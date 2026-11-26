@@ -1,0 +1,22 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 699,
+    "output_tokens": 691,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "with tmp_sessions as (\n    select\n        cast(date_trunc('month', started_at) as date) as month,\n        source,\n        pageviews\n    from {{ source('raw', 'web_sessions') }}\n)\n\nselect\n    month,\n    source,\n    count(*) as sessions,\n    sum(pageviews) as pageviews\nfrom tmp_sessions\ngroup by month, source",
+    "notes": "Direct translation. The temp table tmp_sessions becomes a CTE. The output columns are month, source, sessions and pageviews, in that order. The legacy job has no ORDER BY, so row order is not guaranteed in either version. Months are truncated with DATE_TRUNC on started_at with no timezone conversion, the same as the legacy job, so they follow whatever timezone started_at is stored in.",
+    "quirks_found": [
+      "sessions uses COUNT(*), which counts raw rows rather than distinct session_id. Duplicate session rows in raw.web_sessions (for example from reloads) inflate the session count, and their pageviews are summed again.",
+      "Rows with a NULL source are kept and grouped into their own NULL-source bucket rather than labelled (for example as 'unknown') or dropped.",
+      "Rows with a NULL started_at fall into a NULL month bucket instead of being excluded.",
+      "SUM(pageviews) ignores NULL pageviews but still counts those sessions. A group where every pageviews value is NULL gets pageviews = NULL, not 0.",
+      "No filtering is applied (for example on customer_id IS NULL or on bot traffic), so all sessions, including anonymous ones, are counted."
+    ]
+  }
+}

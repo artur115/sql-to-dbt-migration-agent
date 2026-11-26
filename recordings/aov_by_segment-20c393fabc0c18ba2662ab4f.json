@@ -1,0 +1,23 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 928,
+    "output_tokens": 858,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "SELECT c.segment, c.region, COUNT(*) AS orders, ROUND(AVG(t.gross_amount), 2) AS aov\nFROM {{ ref('order_totals') }} t\nJOIN {{ source('raw', 'customers') }} c ON c.customer_id = t.customer_id\nWHERE t.status <> 'cancelled'\nGROUP BY 1, 2",
+    "notes": "Direct translation. warehouse.legacy_reporting.order_totals becomes ref('order_totals') and warehouse.raw.customers becomes source('raw','customers'). The script has no post-CREATE UPDATE, DELETE or INSERT statements. Output columns are segment, region, orders, aov, in that order. One thing to check: ROUND on AVG may behave slightly differently between the legacy engine and DuckDB at exact .xx5 boundaries if gross_amount is a floating-point type. With DECIMAL inputs the results should match. I joined raw.customers rather than dim_customers to stay faithful to the legacy script.",
+    "quirks_found": [
+      "WHERE t.status <> 'cancelled' also drops orders with NULL status, because NULL <> 'cancelled' evaluates to NULL.",
+      "The status comparison is case-sensitive. Variants such as 'Cancelled' or 'CANCELLED' are not excluded.",
+      "The inner join to raw.customers drops orders whose customer_id is missing from customers or is NULL.",
+      "If raw.customers has duplicate customer_id rows (it is the raw table, not deduplicated), matching orders are counted more than once. This inflates orders and weights the AOV.",
+      "COUNT(*) counts orders with NULL gross_amount, but AVG ignores them. The orders column and the AOV denominator can therefore differ.",
+      "Customers with NULL segment or region are grouped into NULL segment/region rows rather than being excluded."
+    ]
+  }
+}

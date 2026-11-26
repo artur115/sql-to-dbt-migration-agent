@@ -1,0 +1,22 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 528,
+    "output_tokens": 594,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "SELECT product_id, category, list_price,\n       CASE WHEN list_price < 50 THEN 'budget'\n            WHEN list_price < 200 THEN 'mid'\n            ELSE 'premium' END AS price_band\nFROM {{ source('raw', 'products') }}\nWHERE is_active",
+    "notes": "Direct one-to-one translation. The source reference was swapped for source('raw','products'). Column order is the same as the legacy job: product_id, category, list_price, price_band. There are no post-CREATE statements to fold in. This assumes is_active is a BOOLEAN column in DuckDB. If it lands as an integer or string, the bare WHERE predicate may behave differently or fail, so check the source type.",
+    "quirks_found": [
+      "A NULL list_price fails both comparisons and falls through to ELSE, so it is labelled 'premium'.",
+      "Band boundaries are exclusive on the upper end: a price of exactly 50 is 'mid' and exactly 200 is 'premium'.",
+      "WHERE is_active silently drops rows where is_active is NULL, not just rows where it is false.",
+      "No deduplication on product_id. Duplicate product rows in raw.products pass straight through to the dimension.",
+      "Negative list_price values are labelled 'budget' with no validation."
+    ]
+  }
+}

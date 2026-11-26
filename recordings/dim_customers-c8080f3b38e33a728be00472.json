@@ -1,0 +1,24 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 564,
+    "output_tokens": 802,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "with tmp_first as (\n    select\n        customer_id,\n        min(order_ts)::date as first_order_date\n    from {{ source('raw', 'orders') }}\n    where customer_id is not null\n    group by customer_id\n)\n\nselect\n    c.customer_id,\n    c.region,\n    c.segment,\n    c.signup_date,\n    c.marketing_opt_in,\n    f.first_order_date\nfrom {{ source('raw', 'customers') }} c\nleft join tmp_first f\n    on f.customer_id = c.customer_id",
+    "notes": "The temp table tmp_first becomes a CTE. The model reads raw.orders directly, not stg_orders_clean, so it sees exactly the rows the legacy job sees. Swapping in the cleaned staging model could change first_order_date. The job has no post-CREATE UPDATE, DELETE or INSERT statements to fold in. Column order matches the legacy table. Nothing in the job depends on run time or randomness.",
+    "quirks_found": [
+      "first_order_date is the minimum over all raw orders regardless of status. Cancelled, failed or test orders still count toward a customer's first order date.",
+      "raw.orders is used as-is (not deduplicated or cleaned). Duplicate loads don't change the MIN, but bad or late-loaded rows with an early order_ts would.",
+      "The timestamp is cast to DATE after taking the MIN. The date reflects whatever timezone or offset order_ts is stored in; no timezone conversion is applied.",
+      "Customers with no orders, or whose orders all have NULL order_ts, get NULL first_order_date because of the LEFT JOIN.",
+      "Orders whose customer_id has no match in raw.customers are silently dropped.",
+      "raw.customers is not deduplicated. Duplicate customer_id rows in the source appear as duplicate rows in the output, each with the same first_order_date.",
+      "Customer rows with a NULL customer_id are kept, with NULL first_order_date, because the LEFT JOIN on NULL never matches."
+    ]
+  }
+}

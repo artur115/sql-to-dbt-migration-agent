@@ -1,0 +1,11 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "input_tokens": 21071,
+  "output_tokens": 25726,
+  "cache_read_input_tokens": 15532,
+  "cache_creation_input_tokens": 706,
+  "calls": 23,
+  "cost_usd": 0.6085,
+  "mode": "replay"
+}

@@ -1,0 +1,23 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 2174,
+    "output_tokens": 1079,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "SELECT\n    customer_id,\n    lifetime_orders,\n    lifetime_net_revenue,\n    last_order,\n    CASE\n        WHEN last_order < DATE '2026-05-01' THEN 'lapsed'\n        WHEN lifetime_orders = 0 THEN 'prospect'\n        WHEN lifetime_net_revenue >= 2500 THEN 'vip'\n        ELSE 'active'\n    END AS status\nFROM {{ ref('customer_orders_summary') }}",
+    "notes": "Fixed the run error: the previous version wrapped the reference in a conditional Jinja expression, which is not allowed. It now uses a plain {{ ref('customer_orders_summary') }}. The logic is unchanged. The three UPDATEs are folded into one CASE that gives the same final status as running them in script order. 'lapsed' is checked first because UPDATE 2 overwrites any earlier 'prospect' and UPDATE 3 skips rows that are not 'active'. 'prospect' comes next. 'vip' applies only to rows that matched neither earlier condition and so were still 'active' when UPDATE 3 ran. NULL comparisons behave the same in the UPDATE WHERE clauses and the CASE branches: they never fire, so those rows fall through. The cutoff is a fixed literal, so the output does not depend on run time. Columns, order and row count match the legacy table.",
+    "quirks_found": [
+      "The lapsed cutoff is hardcoded to DATE '2026-05-01' rather than relative to the run date, so statuses go stale over time.",
+      "'lapsed' overrides 'prospect' because UPDATE 2 runs after UPDATE 1. A row with lifetime_orders = 0 and an old non-NULL last_order ends up 'lapsed'.",
+      "VIP only applies to rows still 'active'. High-revenue lapsed customers stay 'lapsed', and zero-order rows are never VIP.",
+      "Rows with NULL last_order and NULL or non-zero lifetime_orders are never lapsed. They stay 'active', or become 'vip' if revenue >= 2500.",
+      "NULL lifetime_net_revenue never qualifies as VIP.",
+      "If last_order is a timestamp, comparing it to a DATE literal relies on implicit casting. Any time on 2026-05-01 itself counts as not lapsed."
+    ]
+  }
+}

@@ -37,21 +37,24 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
     calls: int = 0
 
     def add(self, other: dict) -> None:
         self.input_tokens += other.get("input_tokens", 0)
         self.output_tokens += other.get("output_tokens", 0)
         self.cache_read_input_tokens += other.get("cache_read_input_tokens", 0)
+        self.cache_creation_input_tokens += other.get("cache_creation_input_tokens", 0)
         self.calls += 1
 
     def cost_usd(self, model: str) -> float | None:
         if model not in PRICES:
             return None
         pin, pout = PRICES[model]
-        # Cache reads bill at a tenth of the input rate.
+        # Cache writes bill at 1.25x the input rate, cache reads at a tenth of it.
         uncached = self.input_tokens
-        return round((uncached * pin + self.cache_read_input_tokens * pin * 0.1
+        return round((uncached * pin + self.cache_creation_input_tokens * pin * 1.25
+                      + self.cache_read_input_tokens * pin * 0.1
                       + self.output_tokens * pout) / 1e6, 4)
 
 
@@ -114,5 +117,6 @@ class LLM:
         text = next(b.text for b in response.content if b.type == "text")
         u = response.usage
         usage = {"input_tokens": u.input_tokens, "output_tokens": u.output_tokens,
-                 "cache_read_input_tokens": u.cache_read_input_tokens or 0}
+                 "cache_read_input_tokens": u.cache_read_input_tokens or 0,
+                 "cache_creation_input_tokens": u.cache_creation_input_tokens or 0}
         return json.loads(text), usage

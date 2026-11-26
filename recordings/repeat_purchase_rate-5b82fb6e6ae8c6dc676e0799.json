@@ -1,0 +1,27 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 1121,
+    "output_tokens": 1556,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "WITH tmp_seq AS (\n    SELECT customer_id, order_ts,\n           LEAD(order_ts) OVER (PARTITION BY customer_id ORDER BY order_ts, order_id) AS next_ts,\n           ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_ts, order_id) AS n\n    FROM {{ ref('stg_orders_clean') }}\n    WHERE customer_id IS NOT NULL AND status <> 'cancelled'\n)\nSELECT DATE_TRUNC('month', order_ts)::DATE AS cohort_month,\n       COUNT(*) AS new_buyers,\n       SUM(CASE WHEN next_ts <= order_ts + INTERVAL 30 DAY THEN 1 ELSE 0 END) AS repeat_30d,\n       (SUM(CASE WHEN next_ts <= order_ts + INTERVAL 30 DAY THEN 1 ELSE 0 END) * 100) // COUNT(*) AS repeat_pct\nFROM tmp_seq\nWHERE n = 1\nGROUP BY 1",
+    "notes": "Straight translation. The temp table tmp_seq becomes a CTE, and warehouse.legacy_reporting.stg_orders_clean becomes ref('stg_orders_clean'). Expressions, filters and column order are unchanged, so the output matches the legacy table. The result is deterministic. Even when several orders share the first timestamp, the n=1 row's order_ts and next_ts are the same whichever row ROW_NUMBER picks, because next_ts is then equal to order_ts.",
+    "quirks_found": [
+      "repeat_pct uses integer division (//), so the percentage is truncated rather than rounded. The script marks this as intentional.",
+      "status <> 'cancelled' also drops orders whose status is NULL, because a NULL comparison is not true.",
+      "The 'new buyer' cohort is based on a customer's first non-cancelled order, not their first order overall. A customer whose real first order was cancelled is placed in the month of their first non-cancelled order.",
+      "Customers with a NULL customer_id are excluded entirely.",
+      "A second order with the exact same timestamp as the first (including duplicate order rows) counts as a repeat within 30 days, since next_ts <= order_ts + 30 days holds.",
+      "The 30-day window is inclusive (<=) and compares full timestamps, not calendar days.",
+      "Customers with no later order (next_ts NULL) count as non-repeat through the ELSE 0 branch.",
+      "Ties on order_ts are broken by order_id. Rows with a NULL order_id sort last under DuckDB's default NULLS LAST.",
+      "The most recent cohort months have not yet had a full 30 days to observe repeats, so their repeat_pct is biased low. The results also depend on when the job runs, although the SQL itself does not reference the current time.",
+      "If order_ts is TIMESTAMPTZ, DATE_TRUNC('month') and the ::DATE cast depend on the session time zone."
+    ]
+  }
+}

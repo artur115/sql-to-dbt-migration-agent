@@ -1,0 +1,25 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 1061,
+    "output_tokens": 1398,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "with base as (\n    select d.revenue_date as day,\n           d.gross_revenue,\n           coalesce(r.refunded, 0) as refunded,\n           d.gross_revenue - coalesce(r.refunded, 0) as net_revenue\n    from {{ ref('daily_revenue') }} d\n    left join {{ ref('refunds_daily') }} r on r.refund_date = d.revenue_date\n),\nrefund_only as (\n    select r.refund_date as day,\n           0 as gross_revenue,\n           r.refunded as refunded,\n           -r.refunded as net_revenue\n    from {{ ref('refunds_daily') }} r\n    where r.refund_date not in (select revenue_date from {{ ref('daily_revenue') }})\n)\nselect day, gross_revenue, refunded, net_revenue from base\nunion all\nselect day, gross_revenue, refunded, net_revenue from refund_only",
+    "notes": "The CREATE becomes the 'base' CTE. The INSERT that follows it is folded in with UNION ALL as the 'refund_only' CTE. Output columns are day, gross_revenue, refunded, net_revenue, in that order. In the legacy job the INSERT values are coerced to the target column types. In the model, UNION ALL unifies the types instead, so the literal 0 widens to the type of gross_revenue. The anti-join is kept as NOT IN on purpose rather than rewritten as NOT EXISTS or a LEFT JOIN, so its NULL behaviour stays identical. DuckDB uses standard SQL three-valued logic for NOT IN.",
+    "quirks_found": [
+      "NOT IN subquery: if daily_revenue contains any row with a NULL revenue_date, the NOT IN evaluates to NULL for every row, so the INSERT adds no refund-only days at all.",
+      "Refund rows with a NULL refund_date are never inserted, because NULL NOT IN (...) is never true. Those refunds are silently dropped from the reconciliation.",
+      "If refunds_daily has more than one row for the same refund_date, the LEFT JOIN fans out and repeats that day's gross_revenue. Refund-only days would also be inserted more than once. Totals would then be inflated.",
+      "Days in daily_revenue with a NULL revenue_date are kept, with refunded = 0, because the join on NULL never matches.",
+      "If gross_revenue is NULL, net_revenue is NULL, since only refunded is COALESCEd.",
+      "Refund-only days get gross_revenue = 0 rather than NULL.",
+      "If refunded is NULL on a refund-only row, refunded and net_revenue stay NULL there (no COALESCE in the INSERT). On joined rows, a NULL refunded is coalesced to 0.",
+      "The target table has no ORDER BY, so row order is undefined. Refund-only days are appended after the revenue days rather than interleaved by date."
+    ]
+  }
+}

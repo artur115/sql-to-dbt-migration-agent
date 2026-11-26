@@ -1,0 +1,24 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 1058,
+    "output_tokens": 1110,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "WITH tmp_items AS (\n    SELECT order_id,\n           SUM(quantity * unit_price) AS gross_amount,\n           SUM(quantity) AS units\n    FROM {{ source('raw', 'order_items') }}\n    GROUP BY order_id\n),\ntmp_pay AS (\n    SELECT order_id,\n           SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS captured,\n           SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END) AS refunded\n    FROM {{ source('raw', 'payments') }}\n    GROUP BY order_id\n)\nSELECT o.order_id,\n       o.customer_id,\n       o.order_ts,\n       o.status,\n       o.channel,\n       i.gross_amount,\n       i.units,\n       COALESCE(p.captured, 0) AS captured,\n       COALESCE(p.refunded, 0) AS refunded,\n       COALESCE(p.captured, 0) - COALESCE(p.refunded, 0) AS net_revenue\nFROM {{ ref('stg_orders_clean') }} o\nJOIN tmp_items i ON i.order_id = o.order_id\nLEFT JOIN tmp_pay p ON p.order_id = o.order_id",
+    "notes": "Direct translation: the two temp tables become CTEs, raw tables become source() calls, and stg_orders_clean becomes ref(). There are no post-CREATE UPDATE, DELETE or INSERT statements to fold in. Joins, aggregations and the COALESCE logic are kept exactly as in the legacy job, so the column order and row set match. Nothing in the job depends on randomness or the run time.",
+    "quirks_found": [
+      "The INNER JOIN to tmp_items drops every order that has no order_items rows, so those orders are missing from order_totals entirely.",
+      "gross_amount and units are not COALESCEd. If every line for an order has a NULL quantity or unit_price, the value is NULL, and individual NULL lines are silently skipped in the SUM.",
+      "If a payment amount is NULL, the CASE sends it to the ELSE 0 branch, so it adds nothing to captured or refunded. Zero-amount payments are likewise ignored.",
+      "net_revenue is captured minus refunded from payments only. It does not use gross_amount, so it can differ from the item totals.",
+      "Payments are summed with no deduplication. Duplicate payment rows, for example a reloaded payment_id, would inflate captured and refunded.",
+      "Duplicate order_ids in stg_orders_clean, if any, would produce duplicate output rows. There is no dedup on the order side.",
+      "Payments with a NULL order_id, or for orders not in stg_orders_clean, are dropped silently."
+    ]
+  }
+}

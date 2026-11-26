@@ -1,0 +1,25 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 584,
+    "output_tokens": 846,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "SELECT paid_ts::DATE AS refund_date, -SUM(amount) AS refunded, COUNT(*) AS refunds\nFROM {{ source('raw', 'payments') }}\nWHERE method = 'refund'\nGROUP BY 1",
+    "notes": "Direct one-to-one translation. The only change is that warehouse.raw.payments is replaced with the source() reference. Column names, column order, grouping and aggregation are unchanged. The job has no post-CREATE UPDATE, DELETE or INSERT statements to fold in. One caveat: if paid_ts is a TIMESTAMP WITH TIME ZONE rather than a plain TIMESTAMP, the ::DATE cast depends on the session time zone. In that case, make sure the dbt/DuckDB session time zone matches the legacy warehouse so refunds near midnight land on the same day.",
+    "quirks_found": [
+      "The sign is flipped with -SUM(amount), which assumes refund amounts are stored as negatives. Any refund stored as a positive amount produces a negative 'refunded' value, and mixed-sign rows partially cancel each other out.",
+      "Payments with a NULL paid_ts are grouped into a single row with refund_date = NULL.",
+      "COUNT(*) counts every refund row, including rows where amount is NULL, so 'refunds' can exceed the number of rows that contribute to 'refunded'.",
+      "If every amount for a date is NULL, 'refunded' is NULL instead of 0.",
+      "The filter method = 'refund' is a case-sensitive exact match. Variants such as 'Refund', 'REFUND' or values with trailing spaces are excluded, and rows with a NULL method are excluded.",
+      "No deduplication on payment_id, so duplicate payment rows are double-counted in both 'refunded' and 'refunds'.",
+      "Dates with no refunds have no row at all; they are not zero-filled.",
+      "Refunds are attributed to the payment date (paid_ts), not to the original order date or the date in the returns table."
+    ]
+  }
+}

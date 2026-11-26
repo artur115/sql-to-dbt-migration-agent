@@ -1,27 +1,12 @@
-WITH tmp_units AS (
-  SELECT
-    c.region,
-    i.product_id,
-    SUM(i.quantity) AS units
-  FROM {{ source('raw', 'order_items') }} AS i
-  JOIN {{ ref('stg_orders_clean') }} AS o
-    ON o.order_id = i.order_id
-  JOIN {{ source('raw', 'customers') }} AS c
-    ON c.customer_id = o.customer_id
-  GROUP BY
-    1,
-    2
+with tmp_units as (
+  select c.region, i.product_id, sum(i.quantity) as units
+  from {{ source('raw', 'order_items') }} i
+  join {{ ref('stg_orders_clean') }} o on o.order_id = i.order_id
+  join {{ source('raw', 'customers') }} c on c.customer_id = o.customer_id
+  group by 1, 2
 )
-SELECT
-  region,
-  product_id,
-  units,
-  rnk
-FROM (
-  SELECT
-    *,
-    ROW_NUMBER() OVER (PARTITION BY region ORDER BY units DESC, product_id) AS rnk
-  FROM tmp_units
-)
-WHERE
-  rnk <= 5
+select region, product_id, units, rnk from (
+  select *, row_number() over (partition by region order by units desc, product_id) as rnk
+  from tmp_units
+) ranked
+where rnk <= 5
