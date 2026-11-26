@@ -81,7 +81,7 @@ pip install -r requirements.txt
 make demo        # data, tests, baseline, agent replay, dbt build, gate
 ```
 
-`make record` runs the agent for real. It needs `ANTHROPIC_API_KEY`, uses `claude-opus-5-5` at
+`make record` runs the agent for real. It needs `PROOF_ANTHROPIC_API_KEY` (or `ANTHROPIC_API_KEY`), uses `claude-opus-5-5` at
 high effort by default (`MIGRATOR_MODEL` / `MIGRATOR_EFFORT` to change), and writes token
 usage and cost to `report/usage_llm.json`.
 

@@ -92,7 +92,12 @@ class LLM:
         import anthropic
 
         if self._client is None:
-            self._client = anthropic.Anthropic()
+            # Own variable and an explicit base URL: Claude Code cloud sessions set
+            # ANTHROPIC_BASE_URL for themselves, and an ANTHROPIC_API_KEY there is not used.
+            key = os.environ.get("PROOF_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+            if not key:
+                raise RuntimeError("Set PROOF_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY) to run against the API.")
+            self._client = anthropic.Anthropic(api_key=key, base_url="https://api.anthropic.com")
         response = self._client.beta.messages.create(
             model=self.model,
             max_tokens=16000,

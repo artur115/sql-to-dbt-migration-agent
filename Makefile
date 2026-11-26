@@ -12,7 +12,7 @@ baseline: data
 replay: data          ## agent run from saved responses (no API key)
 	python -m migrator.run --translator llm --mode replay --write-models
 
-record: data          ## real agent run; needs ANTHROPIC_API_KEY; saves responses
+record: data          ## real agent run; needs PROOF_ANTHROPIC_API_KEY; saves responses
 	python -m migrator.run --translator llm --mode record --write-models
 
 dbt:
