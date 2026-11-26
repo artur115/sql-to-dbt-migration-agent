@@ -1,24 +1,21 @@
-WITH tmp_agg AS (
-  SELECT
-    customer_id,
-    COUNT(*) AS lifetime_orders,
-    SUM(net_revenue) AS lifetime_net_revenue,
-    CAST(MIN(order_ts) AS DATE) AS first_order,
-    CAST(MAX(order_ts) AS DATE) AS last_order
-  FROM {{ ref('order_totals') }}
-  WHERE
-    status <> 'cancelled' AND NOT customer_id IS NULL
-  GROUP BY
-    customer_id
+with tmp_agg as (
+    select
+        customer_id,
+        count(*) as lifetime_orders,
+        sum(net_revenue) as lifetime_net_revenue,
+        min(order_ts)::date as first_order,
+        max(order_ts)::date as last_order
+    from {{ ref('order_totals') }}
+    where status <> 'cancelled' and customer_id is not null
+    group by customer_id
 )
-SELECT
-  d.customer_id,
-  d.region,
-  d.segment,
-  COALESCE(a.lifetime_orders, 0) AS lifetime_orders,
-  COALESCE(a.lifetime_net_revenue, 0) AS lifetime_net_revenue,
-  a.first_order,
-  a.last_order
-FROM {{ ref('dim_customers') }} AS d
-LEFT JOIN tmp_agg AS a
-  ON a.customer_id = d.customer_id
+select
+    d.customer_id,
+    d.region,
+    d.segment,
+    coalesce(a.lifetime_orders, 0) as lifetime_orders,
+    coalesce(a.lifetime_net_revenue, 0) as lifetime_net_revenue,
+    a.first_order,
+    a.last_order
+from {{ ref('dim_customers') }} d
+left join tmp_agg a on a.customer_id = d.customer_id

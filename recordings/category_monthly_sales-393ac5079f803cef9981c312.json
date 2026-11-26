@@ -1,0 +1,24 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 851,
+    "output_tokens": 962,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "with tmp_cat as (\n    select\n        date_trunc('month', o.order_ts)::date as month,\n        p.category,\n        sum(i.quantity * i.unit_price) as revenue\n    from {{ source('raw', 'order_items') }} i\n    join {{ ref('stg_orders_clean') }} o on o.order_id = i.order_id\n    join {{ source('raw', 'products') }} p on p.product_id = i.product_id\n    where o.status <> 'cancelled'\n    group by 1, 2\n)\nselect\n    month,\n    category,\n    revenue,\n    round(revenue / sum(revenue) over (partition by month), 4) as share_of_month\nfrom tmp_cat",
+    "notes": "Direct translation. The temp table tmp_cat becomes a CTE. The final SELECT keeps the same column order: month, category, revenue, share_of_month. There are no post-CREATE UPDATE, DELETE or INSERT statements to fold in. I assumed the legacy warehouse uses DuckDB-compatible division semantics, where '/' is non-integer division. If the legacy engine did integer division on integer quantity*unit_price, share_of_month would differ, so the owner should confirm the column types.",
+    "quirks_found": [
+      "WHERE o.status <> 'cancelled' also drops orders whose status is NULL, because a NULL comparison is not true.",
+      "Inner join to raw.products silently drops order items whose product_id is missing from products, and their revenue is excluded from both the category and the month totals.",
+      "If raw.products has duplicate product_id rows, the join fans out and multiplies revenue for those items.",
+      "Products with a NULL category are grouped together into a single NULL-category row.",
+      "share_of_month is rounded to 4 decimals, so shares within a month may not sum exactly to 1.",
+      "If a month's total revenue is 0, the share division produces NULL (DuckDB) or an error, depending on the engine.",
+      "Uses raw.order_items quantity*unit_price (list-line revenue) without netting out returns or discounts."
+    ]
+  }
+}

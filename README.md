@@ -15,14 +15,29 @@ the legacy output, a comparison report and a retry, with one rule: if it doesn't
 
 | | Rule-based baseline | Agent (Claude) |
 |---|---:|---:|
-| Jobs accepted (exact match) | **17 / 24** | *not run yet* |
-| Simple / medium / hard accepted | 8/8 · 8/8 · 1/8 | *not run yet* |
-| Rejected for mismatch | 0 | *not run yet* |
-| Sent to a person, with the reason | 7 | *not run yet* |
+| Jobs accepted (exact match) | **17 / 24** | **22 / 24** |
+| Simple / medium / hard accepted | 8/8 · 8/8 · 1/8 | 8/8 · 8/8 · 6/8 |
+| Rejected for mismatch | 0 | 0 |
+| Sent to a person, with the reason | 7 | 2 |
 | Mismatches shipped | **0** | **0** (enforced by the gate) |
 
-The agent column is filled in by the first recorded run (`make record`). Until then it stays
-empty rather than estimated. Per-job detail: [`report/scorecard_baseline.md`](report/scorecard_baseline.md).
+Agent run: `claude-opus-5-5`, effort `high`, recorded 2026-11-26. 23 API calls, 21,071 input +
+25,726 output tokens (plus 706 cache-write and 15,532 cache-read tokens), **total cost $0.6085**
+(about $0.025 per job). `make verify` then built all 22 shipped models with `dbt build`
+(PASS=22, ERROR=0) and found 0 mismatches. Per-job detail:
+[`report/scorecard_llm.md`](report/scorecard_llm.md) (agent) and
+[`report/scorecard_baseline.md`](report/scorecard_baseline.md) (baseline). CI replays the
+saved responses in `recordings/` without an API key.
+
+**Where the agent failed.** Its two unaccepted jobs never reached it: `qa_sample_orders` and
+`open_orders_snapshot` were sent to a person by the gate (see below), not by the agent. Of the
+22 jobs it was given, it got 21 right on the first attempt. The exception was `customer_status`:
+its first model had the right `CASE` logic but wrapped the reference in a Jinja conditional
+(`source(...) if false else ref(...)`), which breaks the "only `source()` and `ref()`" rule, so
+the model was refused before it ran. It fixed this on attempt 2 after seeing the error. It also
+kept the legacy job's hard-coded `DATE '2026-05-01'` lapsed cutoff, which is correct for an exact
+migration, and flagged it as a quirk for the owner rather than fixing it silently. The test set
+is small (24 synthetic jobs, one run), so this shows the method works here, not a general accuracy rate.
 
 ### What the baseline shows
 A rule engine handles the mechanical work: temp tables become CTEs, and hard-coded names

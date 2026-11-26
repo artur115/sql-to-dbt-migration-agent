@@ -1,0 +1,24 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 1360,
+    "output_tokens": 1258,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "with tmp_weeks as (\n    select distinct date_trunc('week', started_at)::date as week\n    from {{ source('raw', 'web_sessions') }}\n),\ntmp_orders_w as (\n    select date_trunc('week', order_ts)::date as week, count(*) as orders, sum(net_revenue) as net_revenue\n    from {{ ref('order_totals') }}\n    where status <> 'cancelled'\n    group by 1\n),\ntmp_sessions_w as (\n    select date_trunc('week', started_at)::date as week, count(*) as sessions\n    from {{ source('raw', 'web_sessions') }}\n    group by 1\n)\nselect\n    w.week,\n    case when o.orders is null then 0 else o.orders end as orders,\n    case when o.net_revenue is null then 0 else o.net_revenue end as net_revenue,\n    s.sessions\nfrom tmp_weeks w\nleft join tmp_orders_w o using (week)\nleft join tmp_sessions_w s using (week)",
+    "notes": "Temp tables become CTEs. The two UPDATEs that back-fill NULL orders and net_revenue with 0 are folded into CASE expressions on the final select. Each UPDATE touches only its own column, so their order does not matter. Column order (week, orders, net_revenue, sessions) and row set are unchanged: one row per distinct session week, including a NULL week if any started_at is NULL. sessions is deliberately not back-filled, matching the legacy job. This assumes the legacy warehouse truncates weeks the same way DuckDB does (weeks start on Monday).",
+    "quirks_found": [
+      "The week spine comes only from web_sessions. Weeks that have orders but no sessions are silently dropped, along with their orders and revenue.",
+      "The filter status <> 'cancelled' also drops orders whose status is NULL.",
+      "Orders with a NULL order_ts fall into a NULL week. That week never matches the spine through the USING join, so those orders are lost.",
+      "If any web_session has a NULL started_at, the output gets a row with week NULL, orders 0, net_revenue 0 and sessions NULL. The NULL key never matches in the join, even though tmp_sessions_w has a NULL-week group with a count.",
+      "sessions is never back-filled with 0, unlike orders and net_revenue. This is only visible on the NULL-week row.",
+      "net_revenue is set to 0 both for weeks with no orders and for weeks where every order's net_revenue is NULL, so the two cases cannot be told apart.",
+      "Week boundaries depend on the engine's DATE_TRUNC('week') convention. DuckDB uses ISO weeks starting on Monday."
+    ]
+  }
+}

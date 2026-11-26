@@ -1,0 +1,22 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 862,
+    "output_tokens": 991,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "with tmp_q as (\n    select\n        date_trunc('quarter', order_ts)::date as quarter,\n        channel,\n        count(*) as orders\n    from {{ ref('stg_orders_clean') }}\n    where status <> 'cancelled'\n    group by 1, 2\n),\n\ntmp_q_tot as (\n    select\n        quarter,\n        sum(orders) as total_orders\n    from tmp_q\n    group by quarter\n)\n\nselect\n    q.quarter,\n    q.channel,\n    q.orders,\n    round(q.orders * 1.0 / t.total_orders, 4) as share\nfrom tmp_q q\njoin tmp_q_tot t using (quarter)",
+    "notes": "Direct translation. The two temp tables become CTEs and the stg_orders_clean reference becomes ref('stg_orders_clean'). The legacy job has no UPDATE, DELETE or INSERT after the CREATE, so nothing needed folding. The column order (quarter, channel, orders, share) and the share expression ROUND(orders * 1.0 / total_orders, 4) are kept exactly as written. No ORDER BY is applied, matching the legacy table.",
+    "quirks_found": [
+      "The filter status <> 'cancelled' also drops rows where status is NULL, because a NULL comparison is not true. Only an exact lowercase 'cancelled' is excluded, so values like 'Cancelled' or 'CANCELLED' are counted as valid orders.",
+      "Orders with a NULL order_ts get a NULL quarter. They are aggregated in tmp_q but then silently dropped by JOIN ... USING (quarter), because NULL never equals NULL. They do not appear in the output at all.",
+      "Orders with a NULL channel are kept as their own NULL-channel group and count toward the quarter total.",
+      "share is rounded to 4 decimal places per row, so the shares within a quarter may not sum to exactly 1.",
+      "Quarter totals are recomputed from the filtered, grouped counts. Shares are therefore relative to non-cancelled orders with a known status only, not to all orders."
+    ]
+  }
+}

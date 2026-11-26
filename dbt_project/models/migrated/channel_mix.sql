@@ -1,27 +1,25 @@
-WITH tmp_q AS (
-  SELECT
-    CAST(DATE_TRUNC('QUARTER', order_ts) AS DATE) AS quarter,
-    channel,
-    COUNT(*) AS orders
-  FROM {{ ref('stg_orders_clean') }}
-  WHERE
-    status <> 'cancelled'
-  GROUP BY
-    1,
-    2
-), tmp_q_tot AS (
-  SELECT
-    quarter,
-    SUM(orders) AS total_orders
-  FROM tmp_q
-  GROUP BY
-    quarter
+with tmp_q as (
+    select
+        date_trunc('quarter', order_ts)::date as quarter,
+        channel,
+        count(*) as orders
+    from {{ ref('stg_orders_clean') }}
+    where status <> 'cancelled'
+    group by 1, 2
+),
+
+tmp_q_tot as (
+    select
+        quarter,
+        sum(orders) as total_orders
+    from tmp_q
+    group by quarter
 )
-SELECT
-  q.quarter,
-  q.channel,
-  q.orders,
-  ROUND(q.orders * 1.0 / t.total_orders, 4) AS share
-FROM tmp_q AS q
-JOIN tmp_q_tot AS t
-  USING (quarter)
+
+select
+    q.quarter,
+    q.channel,
+    q.orders,
+    round(q.orders * 1.0 / t.total_orders, 4) as share
+from tmp_q q
+join tmp_q_tot t using (quarter)

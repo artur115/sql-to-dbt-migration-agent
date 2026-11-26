@@ -1,0 +1,463 @@
+{
+  "summary": {
+    "translator": "llm",
+    "jobs": 24,
+    "accepted": 22,
+    "rejected_mismatch": 0,
+    "needs_human": 2,
+    "by_complexity": {
+      "simple": {
+        "jobs": 8,
+        "accepted": 8
+      },
+      "medium": {
+        "jobs": 8,
+        "accepted": 8
+      },
+      "hard": {
+        "jobs": 8,
+        "accepted": 6
+      }
+    }
+  },
+  "jobs": [
+    {
+      "job": "stg_orders_clean",
+      "owner": "data-platform",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 30000,
+      "quirks_found": [
+        "Nondeterministic dedup: ROW_NUMBER() ordered only by _loaded_at DESC has no tie-breaker, so when rows for the same order_id share the same latest _loaded_at, which row survives is arbitrary.",
+        "NULL _loaded_at handling depends on the engine. In Snowflake or Postgres, DESC puts NULLs first, so a row with a NULL _loaded_at would 'win' over properly timestamped loads. The model makes this explicit with NULLS FIRST.",
+        "Rows with NULL order_id all fall into a single partition, so only one NULL-order_id row is kept and the rest are silently dropped.",
+        "TRIM only removes spaces, so tabs, newlines and non-breaking spaces stay in status. Values that differ only by such characters are not fully normalised.",
+        "LOWER(TRIM(status)) leaves NULL status as NULL and turns an all-space status into an empty string '' rather than NULL.",
+        "_loaded_at is used only for dedup and is not output, so downstream consumers cannot see which load version was kept."
+      ],
+      "model_sql": "with tmp_ranked as (\n    select\n        o.*,\n        row_number() over (\n            partition by order_id\n            order by _loaded_at desc nulls first\n        ) as rn\n    from {{ source('raw', 'orders') }} o\n)\nselect\n    order_id,\n    customer_id,\n    order_ts,\n    lower(trim(status)) as status,\n    channel,\n    promo_code\nfrom tmp_ranked\nwhere rn = 1"
+    },
+    {
+      "job": "dim_customers",
+      "owner": "crm-analytics",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 4000,
+      "quirks_found": [
+        "first_order_date is the minimum over all raw orders regardless of status. Cancelled, failed or test orders still count toward a customer's first order date.",
+        "raw.orders is used as-is (not deduplicated or cleaned). Duplicate loads don't change the MIN, but bad or late-loaded rows with an early order_ts would.",
+        "The timestamp is cast to DATE after taking the MIN. The date reflects whatever timezone or offset order_ts is stored in; no timezone conversion is applied.",
+        "Customers with no orders, or whose orders all have NULL order_ts, get NULL first_order_date because of the LEFT JOIN.",
+        "Orders whose customer_id has no match in raw.customers are silently dropped.",
+        "raw.customers is not deduplicated. Duplicate customer_id rows in the source appear as duplicate rows in the output, each with the same first_order_date.",
+        "Customer rows with a NULL customer_id are kept, with NULL first_order_date, because the LEFT JOIN on NULL never matches."
+      ],
+      "model_sql": "with tmp_first as (\n    select\n        customer_id,\n        min(order_ts)::date as first_order_date\n    from {{ source('raw', 'orders') }}\n    where customer_id is not null\n    group by customer_id\n)\n\nselect\n    c.customer_id,\n    c.region,\n    c.segment,\n    c.signup_date,\n    c.marketing_opt_in,\n    f.first_order_date\nfrom {{ source('raw', 'customers') }} c\nleft join tmp_first f\n    on f.customer_id = c.customer_id"
+    },
+    {
+      "job": "daily_revenue",
+      "owner": "finance-analytics",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 692,
+      "quirks_found": [
+        "The header says 'captured payments', but there is no capture or status filter; raw.payments has no status column. Every payment row with amount > 0 is counted, whatever its outcome.",
+        "The filter amount > 0 silently drops refunds and negative adjustments, so gross_revenue is not net of refunds. Rows with a NULL amount are also dropped, because NULL > 0 is not true.",
+        "Rows with a NULL paid_ts are not filtered out. They are grouped into a single revenue_date = NULL row.",
+        "No deduplication on payment_id. Duplicate payment rows, such as re-loaded records, are double-counted in both gross_revenue and payments.",
+        "The paid_ts::DATE cast truncates to a calendar day in whatever time zone the timestamp or session uses. There is no explicit business-time-zone conversion.",
+        "Days with no qualifying payments get no row at all, rather than a row with 0 revenue."
+      ],
+      "model_sql": "SELECT paid_ts::DATE AS revenue_date, SUM(amount) AS gross_revenue, COUNT(*) AS payments\nFROM {{ source('raw', 'payments') }}\nWHERE amount > 0\nGROUP BY 1"
+    },
+    {
+      "job": "dim_products",
+      "owner": "merchandising",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 271,
+      "quirks_found": [
+        "A NULL list_price fails both comparisons and falls through to ELSE, so it is labelled 'premium'.",
+        "Band boundaries are exclusive on the upper end: a price of exactly 50 is 'mid' and exactly 200 is 'premium'.",
+        "WHERE is_active silently drops rows where is_active is NULL, not just rows where it is false.",
+        "No deduplication on product_id. Duplicate product rows in raw.products pass straight through to the dimension.",
+        "Negative list_price values are labelled 'budget' with no validation."
+      ],
+      "model_sql": "SELECT product_id, category, list_price,\n       CASE WHEN list_price < 50 THEN 'budget'\n            WHEN list_price < 200 THEN 'mid'\n            ELSE 'premium' END AS price_band\nFROM {{ source('raw', 'products') }}\nWHERE is_active"
+    },
+    {
+      "job": "marketing_audience",
+      "owner": "growth",
+      "complexity": "hard",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 1670,
+      "quirks_found": [
+        "Customers with NULL marketing_opt_in are excluded, because the WHERE clause on a NULL boolean filters them out.",
+        "Rows in raw.customers with a NULL customer_id survive the DELETE (NULL IN (...) is never true), so they stay in the audience.",
+        "Duplicate customer_id rows in raw.customers are not deduplicated and appear more than once in the audience.",
+        "The return reason match is exact and case-sensitive ('damaged'). Variants such as 'Damaged' or ' damaged ' do not exclude a customer.",
+        "Exclusion uses raw.orders rather than stg_orders_clean, so orders of any status (cancelled, test, duplicate loads) with a damaged return still exclude the customer.",
+        "Returns whose order_id does not exist in raw.orders are silently ignored by the inner join.",
+        "Any damaged return at any time excludes the customer permanently. There is no time window."
+      ],
+      "model_sql": "WITH audience AS (\n  SELECT customer_id, region, segment\n  FROM {{ source('raw', 'customers') }}\n  WHERE marketing_opt_in\n),\ndamaged_customers AS (\n  SELECT o.customer_id\n  FROM {{ source('raw', 'returns') }} r\n  JOIN {{ source('raw', 'orders') }} o ON o.order_id = r.order_id\n  WHERE r.reason = 'damaged' AND o.customer_id IS NOT NULL\n)\nSELECT a.customer_id, a.region, a.segment\nFROM audience a\nWHERE NOT EXISTS (\n  SELECT 1 FROM damaged_customers d WHERE d.customer_id = a.customer_id\n)"
+    },
+    {
+      "job": "promo_usage",
+      "owner": "growth",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 4,
+      "quirks_found": [
+        "NULL promo codes are relabelled 'none'. They merge with any real promo code whose value is the literal 'none'.",
+        "Empty-string or whitespace promo codes are not normalised. They appear as their own group, separate from 'none'.",
+        "Promo codes are grouped case-sensitively and without trimming, so 'SAVE10' and 'save10 ' count as different codes.",
+        "There is no status filter, so cancelled, refunded or failed orders count toward orders and buyers.",
+        "raw.orders appears to be a load table (_loaded_at), so it may hold duplicate rows per order. COUNT(DISTINCT order_id) hides these duplicates.",
+        "If the same order_id appears under different promo codes across reloads, it is counted in each of those groups.",
+        "COUNT(DISTINCT customer_id) ignores NULL customer_id. Orders without a customer add to orders but not to buyers.",
+        "COUNT(DISTINCT order_id) ignores NULL order_id rows."
+      ],
+      "model_sql": "SELECT COALESCE(promo_code, 'none') AS promo_code,\n       COUNT(DISTINCT order_id) AS orders,\n       COUNT(DISTINCT customer_id) AS buyers\nFROM {{ source('raw', 'orders') }}\nGROUP BY 1"
+    },
+    {
+      "job": "refunds_daily",
+      "owner": "finance-analytics",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 711,
+      "quirks_found": [
+        "The sign is flipped with -SUM(amount), which assumes refund amounts are stored as negatives. Any refund stored as a positive amount produces a negative 'refunded' value, and mixed-sign rows partially cancel each other out.",
+        "Payments with a NULL paid_ts are grouped into a single row with refund_date = NULL.",
+        "COUNT(*) counts every refund row, including rows where amount is NULL, so 'refunds' can exceed the number of rows that contribute to 'refunded'.",
+        "If every amount for a date is NULL, 'refunded' is NULL instead of 0.",
+        "The filter method = 'refund' is a case-sensitive exact match. Variants such as 'Refund', 'REFUND' or values with trailing spaces are excluded, and rows with a NULL method are excluded.",
+        "No deduplication on payment_id, so duplicate payment rows are double-counted in both 'refunded' and 'refunds'.",
+        "Dates with no refunds have no row at all; they are not zero-filled.",
+        "Refunds are attributed to the payment date (paid_ts), not to the original order date or the date in the returns table."
+      ],
+      "model_sql": "SELECT paid_ts::DATE AS refund_date, -SUM(amount) AS refunded, COUNT(*) AS refunds\nFROM {{ source('raw', 'payments') }}\nWHERE method = 'refund'\nGROUP BY 1"
+    },
+    {
+      "job": "return_rate_by_category",
+      "owner": "ops-analytics",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 6,
+      "quirks_found": [
+        "Returns are only counted when the order's _loaded_at exactly equals its order_ts (o._loaded_at = o.order_ts in the join). This is likely a bug and probably excludes most returns.",
+        "There is no lower bound on the 60-day window. Returns with return_ts before order_ts are still counted. Returns with a NULL return_ts are excluded.",
+        "Duplicate rows in raw.orders that share an order_id (and pass the _loaded_at = order_ts check) fan out the returns join and inflate units_returned.",
+        "Duplicate product_id rows in raw.products fan out both the sold and the returned sums.",
+        "Returns are not tied to specific order_items lines. A returned product does not have to appear in the order's items.",
+        "Products with a NULL category are grouped together as a NULL-category row in tmp_sold. USING (category) never matches NULL, so that row always shows units_returned = 0.",
+        "Categories that have returns but no sales are dropped, because the LEFT JOIN starts from tmp_sold.",
+        "If units_sold is 0 or NULL, return_rate is NULL; DuckDB returns NULL on division by zero rather than raising an error.",
+        "return_rate is ROUND(... * 1.0 / units_sold, 4), a decimal rounded to 4 places. The rounding and the resulting type are kept as is.",
+        "Order status is ignored. Cancelled orders still count toward units sold and returns."
+      ],
+      "model_sql": "WITH tmp_sold AS (\n    SELECT p.category, SUM(i.quantity) AS units_sold\n    FROM {{ source('raw', 'order_items') }} i\n    JOIN {{ source('raw', 'products') }} p USING (product_id)\n    GROUP BY 1\n),\ntmp_ret AS (\n    SELECT p.category, SUM(r.quantity) AS units_returned\n    FROM {{ source('raw', 'returns') }} r\n    JOIN {{ source('raw', 'orders') }} o ON o.order_id = r.order_id AND o._loaded_at = o.order_ts\n    JOIN {{ source('raw', 'products') }} p ON p.product_id = r.product_id\n    WHERE r.return_ts <= o.order_ts + INTERVAL 60 DAY\n    GROUP BY 1\n)\nSELECT s.category, s.units_sold, COALESCE(r.units_returned, 0) AS units_returned,\n       ROUND(COALESCE(r.units_returned, 0) * 1.0 / s.units_sold, 4) AS return_rate\nFROM tmp_sold s LEFT JOIN tmp_ret r USING (category)"
+    },
+    {
+      "job": "returns_by_reason",
+      "owner": "ops-analytics",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 103,
+      "quirks_found": [
+        "Rows with NULL reason are not filtered out. They form their own group per month with reason = NULL.",
+        "Rows with NULL return_ts are not filtered out. They are aggregated into a row with month = NULL.",
+        "No deduplication on return_id, so duplicate return rows in raw.returns are counted twice in units.",
+        "SUM(quantity) returns NULL for a group where every quantity is NULL, rather than 0. Negative or zero quantities are summed as-is.",
+        "The output column is named 'month', which is a SQL keyword or function name and may need quoting in downstream queries on some engines."
+      ],
+      "model_sql": "SELECT DATE_TRUNC('month', return_ts)::DATE AS month, reason, SUM(quantity) AS units\nFROM {{ source('raw', 'returns') }}\nGROUP BY 1, 2"
+    },
+    {
+      "job": "sessions_by_source",
+      "owner": "growth",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 138,
+      "quirks_found": [
+        "sessions uses COUNT(*), which counts raw rows rather than distinct session_id. Duplicate session rows in raw.web_sessions (for example from reloads) inflate the session count, and their pageviews are summed again.",
+        "Rows with a NULL source are kept and grouped into their own NULL-source bucket rather than labelled (for example as 'unknown') or dropped.",
+        "Rows with a NULL started_at fall into a NULL month bucket instead of being excluded.",
+        "SUM(pageviews) ignores NULL pageviews but still counts those sessions. A group where every pageviews value is NULL gets pageviews = NULL, not 0.",
+        "No filtering is applied (for example on customer_id IS NULL or on bot traffic), so all sessions, including anonymous ones, are counted."
+      ],
+      "model_sql": "with tmp_sessions as (\n    select\n        cast(date_trunc('month', started_at) as date) as month,\n        source,\n        pageviews\n    from {{ source('raw', 'web_sessions') }}\n)\n\nselect\n    month,\n    source,\n    count(*) as sessions,\n    sum(pageviews) as pageviews\nfrom tmp_sessions\ngroup by month, source"
+    },
+    {
+      "job": "category_monthly_sales",
+      "owner": "merchandising",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 138,
+      "quirks_found": [
+        "WHERE o.status <> 'cancelled' also drops orders whose status is NULL, because a NULL comparison is not true.",
+        "Inner join to raw.products silently drops order items whose product_id is missing from products, and their revenue is excluded from both the category and the month totals.",
+        "If raw.products has duplicate product_id rows, the join fans out and multiplies revenue for those items.",
+        "Products with a NULL category are grouped together into a single NULL-category row.",
+        "share_of_month is rounded to 4 decimals, so shares within a month may not sum exactly to 1.",
+        "If a month's total revenue is 0, the share division produces NULL (DuckDB) or an error, depending on the engine.",
+        "Uses raw.order_items quantity*unit_price (list-line revenue) without netting out returns or discounts."
+      ],
+      "model_sql": "with tmp_cat as (\n    select\n        date_trunc('month', o.order_ts)::date as month,\n        p.category,\n        sum(i.quantity * i.unit_price) as revenue\n    from {{ source('raw', 'order_items') }} i\n    join {{ ref('stg_orders_clean') }} o on o.order_id = i.order_id\n    join {{ source('raw', 'products') }} p on p.product_id = i.product_id\n    where o.status <> 'cancelled'\n    group by 1, 2\n)\nselect\n    month,\n    category,\n    revenue,\n    round(revenue / sum(revenue) over (partition by month), 4) as share_of_month\nfrom tmp_cat"
+    },
+    {
+      "job": "channel_mix",
+      "owner": "growth",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 32,
+      "quirks_found": [
+        "The filter status <> 'cancelled' also drops rows where status is NULL, because a NULL comparison is not true. Only an exact lowercase 'cancelled' is excluded, so values like 'Cancelled' or 'CANCELLED' are counted as valid orders.",
+        "Orders with a NULL order_ts get a NULL quarter. They are aggregated in tmp_q but then silently dropped by JOIN ... USING (quarter), because NULL never equals NULL. They do not appear in the output at all.",
+        "Orders with a NULL channel are kept as their own NULL-channel group and count toward the quarter total.",
+        "share is rounded to 4 decimal places per row, so the shares within a quarter may not sum to exactly 1.",
+        "Quarter totals are recomputed from the filtered, grouped counts. Shares are therefore relative to non-cancelled orders with a known status only, not to all orders."
+      ],
+      "model_sql": "with tmp_q as (\n    select\n        date_trunc('quarter', order_ts)::date as quarter,\n        channel,\n        count(*) as orders\n    from {{ ref('stg_orders_clean') }}\n    where status <> 'cancelled'\n    group by 1, 2\n),\n\ntmp_q_tot as (\n    select\n        quarter,\n        sum(orders) as total_orders\n    from tmp_q\n    group by quarter\n)\n\nselect\n    q.quarter,\n    q.channel,\n    q.orders,\n    round(q.orders * 1.0 / t.total_orders, 4) as share\nfrom tmp_q q\njoin tmp_q_tot t using (quarter)"
+    },
+    {
+      "job": "open_orders_snapshot",
+      "owner": "ops-analytics",
+      "complexity": "hard",
+      "status": "needs_human",
+      "reason": "output depends on when it runs (current_date); agree a fixed as-of date or seed with the owner",
+      "attempts": 0,
+      "legacy_rows": 184,
+      "quirks_found": [],
+      "model_sql": ""
+    },
+    {
+      "job": "order_totals",
+      "owner": "finance-analytics",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 30000,
+      "quirks_found": [
+        "The INNER JOIN to tmp_items drops every order that has no order_items rows, so those orders are missing from order_totals entirely.",
+        "gross_amount and units are not COALESCEd. If every line for an order has a NULL quantity or unit_price, the value is NULL, and individual NULL lines are silently skipped in the SUM.",
+        "If a payment amount is NULL, the CASE sends it to the ELSE 0 branch, so it adds nothing to captured or refunded. Zero-amount payments are likewise ignored.",
+        "net_revenue is captured minus refunded from payments only. It does not use gross_amount, so it can differ from the item totals.",
+        "Payments are summed with no deduplication. Duplicate payment rows, for example a reloaded payment_id, would inflate captured and refunded.",
+        "Duplicate order_ids in stg_orders_clean, if any, would produce duplicate output rows. There is no dedup on the order side.",
+        "Payments with a NULL order_id, or for orders not in stg_orders_clean, are dropped silently."
+      ],
+      "model_sql": "WITH tmp_items AS (\n    SELECT order_id,\n           SUM(quantity * unit_price) AS gross_amount,\n           SUM(quantity) AS units\n    FROM {{ source('raw', 'order_items') }}\n    GROUP BY order_id\n),\ntmp_pay AS (\n    SELECT order_id,\n           SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS captured,\n           SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END) AS refunded\n    FROM {{ source('raw', 'payments') }}\n    GROUP BY order_id\n)\nSELECT o.order_id,\n       o.customer_id,\n       o.order_ts,\n       o.status,\n       o.channel,\n       i.gross_amount,\n       i.units,\n       COALESCE(p.captured, 0) AS captured,\n       COALESCE(p.refunded, 0) AS refunded,\n       COALESCE(p.captured, 0) - COALESCE(p.refunded, 0) AS net_revenue\nFROM {{ ref('stg_orders_clean') }} o\nJOIN tmp_items i ON i.order_id = o.order_id\nLEFT JOIN tmp_pay p ON p.order_id = o.order_id"
+    },
+    {
+      "job": "qa_sample_orders",
+      "owner": "data-platform",
+      "complexity": "hard",
+      "status": "needs_human",
+      "reason": "output depends on when it runs (random); agree a fixed as-of date or seed with the owner",
+      "attempts": 0,
+      "legacy_rows": 300,
+      "quirks_found": [],
+      "model_sql": ""
+    },
+    {
+      "job": "repeat_purchase_rate",
+      "owner": "crm-analytics",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 23,
+      "quirks_found": [
+        "repeat_pct uses integer division (//), so the percentage is truncated rather than rounded. The script marks this as intentional.",
+        "status <> 'cancelled' also drops orders whose status is NULL, because a NULL comparison is not true.",
+        "The 'new buyer' cohort is based on a customer's first non-cancelled order, not their first order overall. A customer whose real first order was cancelled is placed in the month of their first non-cancelled order.",
+        "Customers with a NULL customer_id are excluded entirely.",
+        "A second order with the exact same timestamp as the first (including duplicate order rows) counts as a repeat within 30 days, since next_ts <= order_ts + 30 days holds.",
+        "The 30-day window is inclusive (<=) and compares full timestamps, not calendar days.",
+        "Customers with no later order (next_ts NULL) count as non-repeat through the ELSE 0 branch.",
+        "Ties on order_ts are broken by order_id. Rows with a NULL order_id sort last under DuckDB's default NULLS LAST.",
+        "The most recent cohort months have not yet had a full 30 days to observe repeats, so their repeat_pct is biased low. The results also depend on when the job runs, although the SQL itself does not reference the current time.",
+        "If order_ts is TIMESTAMPTZ, DATE_TRUNC('month') and the ::DATE cast depend on the session time zone."
+      ],
+      "model_sql": "WITH tmp_seq AS (\n    SELECT customer_id, order_ts,\n           LEAD(order_ts) OVER (PARTITION BY customer_id ORDER BY order_ts, order_id) AS next_ts,\n           ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_ts, order_id) AS n\n    FROM {{ ref('stg_orders_clean') }}\n    WHERE customer_id IS NOT NULL AND status <> 'cancelled'\n)\nSELECT DATE_TRUNC('month', order_ts)::DATE AS cohort_month,\n       COUNT(*) AS new_buyers,\n       SUM(CASE WHEN next_ts <= order_ts + INTERVAL 30 DAY THEN 1 ELSE 0 END) AS repeat_30d,\n       (SUM(CASE WHEN next_ts <= order_ts + INTERVAL 30 DAY THEN 1 ELSE 0 END) * 100) // COUNT(*) AS repeat_pct\nFROM tmp_seq\nWHERE n = 1\nGROUP BY 1"
+    },
+    {
+      "job": "session_attribution",
+      "owner": "growth",
+      "complexity": "hard",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 24958,
+      "quirks_found": [
+        "status <> 'cancelled' also drops orders whose status is NULL, because the comparison evaluates to NULL.",
+        "The attribution window is asymmetric: a session starting exactly at order_ts counts, but one starting exactly 7 days before does not.",
+        "The latest session is picked first and then COALESCE is applied. If that session's source is NULL, the order shows 'unattributed' even when an earlier session in the window has a non-NULL source.",
+        "Sessions with NULL started_at or NULL customer_id never match any order.",
+        "Ties on started_at are broken by the highest session_id. If session_id is also NULL, the pick depends on how NULLs are ordered.",
+        "Sessions after the order timestamp are ignored, and there is no fallback to sessions older than 7 days.",
+        "Duplicate rows in stg_orders_clean are not deduplicated, so each one gets its own attribution row."
+      ],
+      "model_sql": "SELECT o.order_id, o.customer_id, o.order_ts,\n       COALESCE((\n         SELECT s.source\n         FROM {{ source('raw', 'web_sessions') }} s\n         WHERE s.customer_id = o.customer_id\n           AND s.started_at <= o.order_ts\n           AND s.started_at > o.order_ts - INTERVAL 7 DAY\n         ORDER BY s.started_at DESC, s.session_id DESC\n         LIMIT 1\n       ), 'unattributed') AS last_touch_source\nFROM {{ ref('stg_orders_clean') }} o\nWHERE o.customer_id IS NOT NULL AND o.status <> 'cancelled'"
+    },
+    {
+      "job": "top_products_by_region",
+      "owner": "merchandising",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 25,
+      "quirks_found": [
+        "Inner joins drop order items whose order is missing from stg_orders_clean and orders whose customer is missing from raw.customers.",
+        "Duplicate customer_id rows in raw.customers would fan out and multiply units. Duplicate order_ids in stg_orders_clean would do the same.",
+        "Customers with a NULL region are grouped together into a single NULL region, which can appear in the top-5 output.",
+        "Order items with a NULL product_id form their own group and can be ranked.",
+        "SUM(quantity) is NULL if all quantities in a group are NULL. Where such rows land under ORDER BY units DESC depends on the engine's default NULL ordering.",
+        "Returns are not subtracted: units counts gross quantity ordered, filtered only by whatever stg_orders_clean keeps.",
+        "ROW_NUMBER is used rather than RANK, so ties on units are broken by the lowest product_id and exactly 5 rows are kept per region."
+      ],
+      "model_sql": "with tmp_units as (\n  select c.region, i.product_id, sum(i.quantity) as units\n  from {{ source('raw', 'order_items') }} i\n  join {{ ref('stg_orders_clean') }} o on o.order_id = i.order_id\n  join {{ source('raw', 'customers') }} c on c.customer_id = o.customer_id\n  group by 1, 2\n)\nselect region, product_id, units, rnk from (\n  select *, row_number() over (partition by region order by units desc, product_id) as rnk\n  from tmp_units\n) ranked\nwhere rnk <= 5"
+    },
+    {
+      "job": "revenue_reconciliation",
+      "owner": "finance-analytics",
+      "complexity": "hard",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 724,
+      "quirks_found": [
+        "NOT IN subquery: if daily_revenue contains any row with a NULL revenue_date, the NOT IN evaluates to NULL for every row, so the INSERT adds no refund-only days at all.",
+        "Refund rows with a NULL refund_date are never inserted, because NULL NOT IN (...) is never true. Those refunds are silently dropped from the reconciliation.",
+        "If refunds_daily has more than one row for the same refund_date, the LEFT JOIN fans out and repeats that day's gross_revenue. Refund-only days would also be inserted more than once. Totals would then be inflated.",
+        "Days in daily_revenue with a NULL revenue_date are kept, with refunded = 0, because the join on NULL never matches.",
+        "If gross_revenue is NULL, net_revenue is NULL, since only refunded is COALESCEd.",
+        "Refund-only days get gross_revenue = 0 rather than NULL.",
+        "If refunded is NULL on a refund-only row, refunded and net_revenue stay NULL there (no COALESCE in the INSERT). On joined rows, a NULL refunded is coalesced to 0.",
+        "The target table has no ORDER BY, so row order is undefined. Refund-only days are appended after the revenue days rather than interleaved by date."
+      ],
+      "model_sql": "with base as (\n    select d.revenue_date as day,\n           d.gross_revenue,\n           coalesce(r.refunded, 0) as refunded,\n           d.gross_revenue - coalesce(r.refunded, 0) as net_revenue\n    from {{ ref('daily_revenue') }} d\n    left join {{ ref('refunds_daily') }} r on r.refund_date = d.revenue_date\n),\nrefund_only as (\n    select r.refund_date as day,\n           0 as gross_revenue,\n           r.refunded as refunded,\n           -r.refunded as net_revenue\n    from {{ ref('refunds_daily') }} r\n    where r.refund_date not in (select revenue_date from {{ ref('daily_revenue') }})\n)\nselect day, gross_revenue, refunded, net_revenue from base\nunion all\nselect day, gross_revenue, refunded, net_revenue from refund_only"
+    },
+    {
+      "job": "aov_by_segment",
+      "owner": "finance-analytics",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 15,
+      "quirks_found": [
+        "WHERE t.status <> 'cancelled' also drops orders with NULL status, because NULL <> 'cancelled' evaluates to NULL.",
+        "The status comparison is case-sensitive. Variants such as 'Cancelled' or 'CANCELLED' are not excluded.",
+        "The inner join to raw.customers drops orders whose customer_id is missing from customers or is NULL.",
+        "If raw.customers has duplicate customer_id rows (it is the raw table, not deduplicated), matching orders are counted more than once. This inflates orders and weights the AOV.",
+        "COUNT(*) counts orders with NULL gross_amount, but AVG ignores them. The orders column and the AOV denominator can therefore differ.",
+        "Customers with NULL segment or region are grouped into NULL segment/region rows rather than being excluded."
+      ],
+      "model_sql": "SELECT c.segment, c.region, COUNT(*) AS orders, ROUND(AVG(t.gross_amount), 2) AS aov\nFROM {{ ref('order_totals') }} t\nJOIN {{ source('raw', 'customers') }} c ON c.customer_id = t.customer_id\nWHERE t.status <> 'cancelled'\nGROUP BY 1, 2"
+    },
+    {
+      "job": "customer_orders_summary",
+      "owner": "crm-analytics",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 4000,
+      "quirks_found": [
+        "The filter status <> 'cancelled' also drops orders whose status is NULL, because a NULL comparison is never true. Those orders are left out of lifetime counts and revenue.",
+        "The status match is case-sensitive. Values such as 'Cancelled' or 'CANCELLED' are not excluded and are counted as live orders.",
+        "COUNT(*) counts every non-cancelled order, including orders with NULL net_revenue. A customer can therefore have lifetime_orders > 0 while lifetime_net_revenue is 0.",
+        "COALESCE(SUM(net_revenue), 0) turns a sum that is NULL (all of the customer's net_revenue values are NULL) into 0. This makes such customers look the same as customers with genuinely zero revenue.",
+        "Customers with no qualifying orders get lifetime_orders = 0 and lifetime_net_revenue = 0, but first_order and last_order stay NULL (these two columns are not coalesced).",
+        "Orders whose customer_id is not in dim_customers are silently dropped by the LEFT JOIN from dim_customers.",
+        "If dim_customers ever contains duplicate customer_id rows, the output repeats those customers and their aggregates.",
+        "first_order and last_order are truncated to DATE, so time-of-day and any timezone context are lost. If order_ts is a timestamptz, the date depends on the session timezone."
+      ],
+      "model_sql": "with tmp_agg as (\n    select\n        customer_id,\n        count(*) as lifetime_orders,\n        sum(net_revenue) as lifetime_net_revenue,\n        min(order_ts)::date as first_order,\n        max(order_ts)::date as last_order\n    from {{ ref('order_totals') }}\n    where status <> 'cancelled' and customer_id is not null\n    group by customer_id\n)\nselect\n    d.customer_id,\n    d.region,\n    d.segment,\n    coalesce(a.lifetime_orders, 0) as lifetime_orders,\n    coalesce(a.lifetime_net_revenue, 0) as lifetime_net_revenue,\n    a.first_order,\n    a.last_order\nfrom {{ ref('dim_customers') }} d\nleft join tmp_agg a on a.customer_id = d.customer_id"
+    },
+    {
+      "job": "weekly_kpis",
+      "owner": "finance-analytics",
+      "complexity": "hard",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 99,
+      "quirks_found": [
+        "The week spine comes only from web_sessions. Weeks that have orders but no sessions are silently dropped, along with their orders and revenue.",
+        "The filter status <> 'cancelled' also drops orders whose status is NULL.",
+        "Orders with a NULL order_ts fall into a NULL week. That week never matches the spine through the USING join, so those orders are lost.",
+        "If any web_session has a NULL started_at, the output gets a row with week NULL, orders 0, net_revenue 0 and sessions NULL. The NULL key never matches in the join, even though tmp_sessions_w has a NULL-week group with a count.",
+        "sessions is never back-filled with 0, unlike orders and net_revenue. This is only visible on the NULL-week row.",
+        "net_revenue is set to 0 both for weeks with no orders and for weeks where every order's net_revenue is NULL, so the two cases cannot be told apart.",
+        "Week boundaries depend on the engine's DATE_TRUNC('week') convention. DuckDB uses ISO weeks starting on Monday."
+      ],
+      "model_sql": "with tmp_weeks as (\n    select distinct date_trunc('week', started_at)::date as week\n    from {{ source('raw', 'web_sessions') }}\n),\ntmp_orders_w as (\n    select date_trunc('week', order_ts)::date as week, count(*) as orders, sum(net_revenue) as net_revenue\n    from {{ ref('order_totals') }}\n    where status <> 'cancelled'\n    group by 1\n),\ntmp_sessions_w as (\n    select date_trunc('week', started_at)::date as week, count(*) as sessions\n    from {{ source('raw', 'web_sessions') }}\n    group by 1\n)\nselect\n    w.week,\n    case when o.orders is null then 0 else o.orders end as orders,\n    case when o.net_revenue is null then 0 else o.net_revenue end as net_revenue,\n    s.sessions\nfrom tmp_weeks w\nleft join tmp_orders_w o using (week)\nleft join tmp_sessions_w s using (week)"
+    },
+    {
+      "job": "customer_status",
+      "owner": "crm-analytics",
+      "complexity": "hard",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 2)",
+      "attempts": 2,
+      "legacy_rows": 4000,
+      "quirks_found": [
+        "The lapsed cutoff is hardcoded to DATE '2026-05-01' rather than relative to the run date, so statuses go stale over time.",
+        "'lapsed' overrides 'prospect' because UPDATE 2 runs after UPDATE 1. A row with lifetime_orders = 0 and an old non-NULL last_order ends up 'lapsed'.",
+        "VIP only applies to rows still 'active'. High-revenue lapsed customers stay 'lapsed', and zero-order rows are never VIP.",
+        "Rows with NULL last_order and NULL or non-zero lifetime_orders are never lapsed. They stay 'active', or become 'vip' if revenue >= 2500.",
+        "NULL lifetime_net_revenue never qualifies as VIP.",
+        "If last_order is a timestamp, comparing it to a DATE literal relies on implicit casting. Any time on 2026-05-01 itself counts as not lapsed."
+      ],
+      "model_sql": "SELECT\n    customer_id,\n    lifetime_orders,\n    lifetime_net_revenue,\n    last_order,\n    CASE\n        WHEN last_order < DATE '2026-05-01' THEN 'lapsed'\n        WHEN lifetime_orders = 0 THEN 'prospect'\n        WHEN lifetime_net_revenue >= 2500 THEN 'vip'\n        ELSE 'active'\n    END AS status\nFROM {{ ref('customer_orders_summary') }}"
+    },
+    {
+      "job": "ltv_bands",
+      "owner": "crm-analytics",
+      "complexity": "hard",
+      "status": "accepted",
+      "reason": "parallel run matches (attempt 1)",
+      "attempts": 1,
+      "legacy_rows": 3995,
+      "quirks_found": [
+        "Customers with a NULL segment are always banded 'low'. The UPDATE join t.segment = b.segment never matches NULL, even though QUANTILE_CONT does build a threshold row for the NULL segment group.",
+        "Customers with NULL lifetime_net_revenue are always 'low' because the comparison against the thresholds is NULL. QUANTILE_CONT also ignores those NULLs when it computes the thresholds.",
+        "If every revenue in a segment is NULL, p50 and p90 are NULL and the whole segment stays 'low'.",
+        "QUANTILE_CONT interpolates, so thresholds may be values that no customer actually has. The comparisons use >=, so ties at the threshold move up a band.",
+        "For a segment with a single customer (or identical revenues), p50 = p90 = that value, so every customer in the segment is banded 'high'.",
+        "Customers with negative lifetime net revenue (heavy refunds) can still land in 'mid' or 'high' if their whole segment is negative, because the thresholds are relative to each segment.",
+        "Thresholds are computed only over customers with lifetime_orders > 0, the same filter as the banded population. Customers with zero orders are excluded from the output entirely."
+      ],
+      "model_sql": "with thresholds as (\n    select segment,\n           quantile_cont(lifetime_net_revenue, 0.5) as p50,\n           quantile_cont(lifetime_net_revenue, 0.9) as p90\n    from {{ ref('customer_orders_summary') }}\n    where lifetime_orders > 0\n    group by segment\n),\nbase as (\n    select customer_id, segment, lifetime_net_revenue, 'low' as band\n    from {{ ref('customer_orders_summary') }}\n    where lifetime_orders > 0\n)\nselect b.customer_id,\n       b.segment,\n       b.lifetime_net_revenue,\n       case\n           when b.lifetime_net_revenue >= t.p90 then 'high'\n           when b.lifetime_net_revenue >= t.p50 then 'mid'\n           else b.band\n       end as band\nfrom base b\nleft join thresholds t\n  on t.segment = b.segment"
+    }
+  ]
+}

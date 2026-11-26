@@ -1,0 +1,24 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 645,
+    "output_tokens": 1315,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "WITH audience AS (\n  SELECT customer_id, region, segment\n  FROM {{ source('raw', 'customers') }}\n  WHERE marketing_opt_in\n),\ndamaged_customers AS (\n  SELECT o.customer_id\n  FROM {{ source('raw', 'returns') }} r\n  JOIN {{ source('raw', 'orders') }} o ON o.order_id = r.order_id\n  WHERE r.reason = 'damaged' AND o.customer_id IS NOT NULL\n)\nSELECT a.customer_id, a.region, a.segment\nFROM audience a\nWHERE NOT EXISTS (\n  SELECT 1 FROM damaged_customers d WHERE d.customer_id = a.customer_id\n)",
+    "notes": "The CREATE becomes the audience CTE. The DELETE ... WHERE customer_id IN (subquery) is folded in as a NOT EXISTS anti-join. NOT EXISTS was chosen over NOT IN on purpose. In the legacy DELETE, a row whose customer_id is NULL evaluates 'NULL IN (...)' to NULL, so that row is never deleted and stays in the table. A plain 'customer_id NOT IN (...)' filter would drop those rows whenever the damaged list is non-empty. NOT EXISTS keeps them, which matches the legacy output. Duplicate customer rows are kept as-is, because the legacy job does not deduplicate either. Duplicate matches in the subquery do not change the anti-join result. Columns and their order match the legacy output: customer_id, region, segment.",
+    "quirks_found": [
+      "Customers with NULL marketing_opt_in are excluded, because the WHERE clause on a NULL boolean filters them out.",
+      "Rows in raw.customers with a NULL customer_id survive the DELETE (NULL IN (...) is never true), so they stay in the audience.",
+      "Duplicate customer_id rows in raw.customers are not deduplicated and appear more than once in the audience.",
+      "The return reason match is exact and case-sensitive ('damaged'). Variants such as 'Damaged' or ' damaged ' do not exclude a customer.",
+      "Exclusion uses raw.orders rather than stg_orders_clean, so orders of any status (cancelled, test, duplicate loads) with a damaged return still exclude the customer.",
+      "Returns whose order_id does not exist in raw.orders are silently ignored by the inner join.",
+      "Any damaged return at any time excludes the customer permanently. There is no time window."
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 566,
+    "output_tokens": 899,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "SELECT COALESCE(promo_code, 'none') AS promo_code,\n       COUNT(DISTINCT order_id) AS orders,\n       COUNT(DISTINCT customer_id) AS buyers\nFROM {{ source('raw', 'orders') }}\nGROUP BY 1",
+    "notes": "Direct one-to-one translation. The only change is that warehouse.raw.orders is now {{ source('raw', 'orders') }}. I kept GROUP BY 1 on purpose. The alias promo_code has the same name as the source column, and in DuckDB `GROUP BY promo_code` would group by the raw column instead of the COALESCE expression. 'GROUP BY 1' groups by the COALESCE expression, the same as the legacy job. The model reads raw.orders, not stg_orders_clean, because the cleaning rules in that model are unknown and could change the counts.",
+    "quirks_found": [
+      "NULL promo codes are relabelled 'none'. They merge with any real promo code whose value is the literal 'none'.",
+      "Empty-string or whitespace promo codes are not normalised. They appear as their own group, separate from 'none'.",
+      "Promo codes are grouped case-sensitively and without trimming, so 'SAVE10' and 'save10 ' count as different codes.",
+      "There is no status filter, so cancelled, refunded or failed orders count toward orders and buyers.",
+      "raw.orders appears to be a load table (_loaded_at), so it may hold duplicate rows per order. COUNT(DISTINCT order_id) hides these duplicates.",
+      "If the same order_id appears under different promo codes across reloads, it is counted in each of those groups.",
+      "COUNT(DISTINCT customer_id) ignores NULL customer_id. Orders without a customer add to orders but not to buyers.",
+      "COUNT(DISTINCT order_id) ignores NULL order_id rows."
+    ]
+  }
+}

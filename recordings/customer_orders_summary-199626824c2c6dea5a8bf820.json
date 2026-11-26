@@ -1,0 +1,25 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 1150,
+    "output_tokens": 1086,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "with tmp_agg as (\n    select\n        customer_id,\n        count(*) as lifetime_orders,\n        sum(net_revenue) as lifetime_net_revenue,\n        min(order_ts)::date as first_order,\n        max(order_ts)::date as last_order\n    from {{ ref('order_totals') }}\n    where status <> 'cancelled' and customer_id is not null\n    group by customer_id\n)\nselect\n    d.customer_id,\n    d.region,\n    d.segment,\n    coalesce(a.lifetime_orders, 0) as lifetime_orders,\n    coalesce(a.lifetime_net_revenue, 0) as lifetime_net_revenue,\n    a.first_order,\n    a.last_order\nfrom {{ ref('dim_customers') }} d\nleft join tmp_agg a on a.customer_id = d.customer_id",
+    "notes": "Direct translation. The temp table tmp_agg is now a CTE. Both legacy_reporting tables are now ref() calls to the already-migrated order_totals and dim_customers models. There are no post-CREATE UPDATE, DELETE or INSERT statements to fold in. Column names, column order, filters, aggregation and join semantics are unchanged, so the output should match the legacy table row for row.",
+    "quirks_found": [
+      "The filter status <> 'cancelled' also drops orders whose status is NULL, because a NULL comparison is never true. Those orders are left out of lifetime counts and revenue.",
+      "The status match is case-sensitive. Values such as 'Cancelled' or 'CANCELLED' are not excluded and are counted as live orders.",
+      "COUNT(*) counts every non-cancelled order, including orders with NULL net_revenue. A customer can therefore have lifetime_orders > 0 while lifetime_net_revenue is 0.",
+      "COALESCE(SUM(net_revenue), 0) turns a sum that is NULL (all of the customer's net_revenue values are NULL) into 0. This makes such customers look the same as customers with genuinely zero revenue.",
+      "Customers with no qualifying orders get lifetime_orders = 0 and lifetime_net_revenue = 0, but first_order and last_order stay NULL (these two columns are not coalesced).",
+      "Orders whose customer_id is not in dim_customers are silently dropped by the LEFT JOIN from dim_customers.",
+      "If dim_customers ever contains duplicate customer_id rows, the output repeats those customers and their aggregates.",
+      "first_order and last_order are truncated to DATE, so time-of-day and any timezone context are lost. If order_ts is a timestamptz, the date depends on the session timezone."
+    ]
+  }
+}

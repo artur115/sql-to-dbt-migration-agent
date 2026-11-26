@@ -1,16 +1,15 @@
-WITH tmp_sessions AS (
-  SELECT
-    CAST(DATE_TRUNC('MONTH', started_at) AS DATE) AS month,
-    source,
-    pageviews
-  FROM {{ source('raw', 'web_sessions') }}
+with tmp_sessions as (
+    select
+        cast(date_trunc('month', started_at) as date) as month,
+        source,
+        pageviews
+    from {{ source('raw', 'web_sessions') }}
 )
-SELECT
-  month,
-  source,
-  COUNT(*) AS sessions,
-  SUM(pageviews) AS pageviews
-FROM tmp_sessions
-GROUP BY
-  month,
-  source
+
+select
+    month,
+    source,
+    count(*) as sessions,
+    sum(pageviews) as pageviews
+from tmp_sessions
+group by month, source

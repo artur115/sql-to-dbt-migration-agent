@@ -1,16 +1,18 @@
-WITH tmp_ranked AS (
-  SELECT
-    o.*,
-    ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY _loaded_at DESC) AS rn
-  FROM {{ source('raw', 'orders') }} AS o
+with tmp_ranked as (
+    select
+        o.*,
+        row_number() over (
+            partition by order_id
+            order by _loaded_at desc nulls first
+        ) as rn
+    from {{ source('raw', 'orders') }} o
 )
-SELECT
-  order_id,
-  customer_id,
-  order_ts,
-  LOWER(TRIM(status)) AS status,
-  channel,
-  promo_code
-FROM tmp_ranked
-WHERE
-  rn = 1
+select
+    order_id,
+    customer_id,
+    order_ts,
+    lower(trim(status)) as status,
+    channel,
+    promo_code
+from tmp_ranked
+where rn = 1

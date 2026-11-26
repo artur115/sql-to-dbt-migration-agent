@@ -1,0 +1,22 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 620,
+    "output_tokens": 672,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "SELECT DATE_TRUNC('month', return_ts)::DATE AS month, reason, SUM(quantity) AS units\nFROM {{ source('raw', 'returns') }}\nGROUP BY 1, 2",
+    "notes": "Direct one-to-one translation. The only change is that warehouse.raw.returns is now {{ source('raw', 'returns') }}. There are no follow-up UPDATE, DELETE or INSERT statements to fold in. The output columns are month, reason and units, in that order. Caveat: if return_ts is stored as TIMESTAMP WITH TIME ZONE, DATE_TRUNC and the DATE cast depend on the session time zone. In that case month boundaries could differ from the legacy warehouse unless both use the same time zone. If it is a plain TIMESTAMP, the result is fully deterministic.",
+    "quirks_found": [
+      "Rows with NULL reason are not filtered out. They form their own group per month with reason = NULL.",
+      "Rows with NULL return_ts are not filtered out. They are aggregated into a row with month = NULL.",
+      "No deduplication on return_id, so duplicate return rows in raw.returns are counted twice in units.",
+      "SUM(quantity) returns NULL for a group where every quantity is NULL, rather than 0. Negative or zero quantities are summed as-is.",
+      "The output column is named 'month', which is a SQL keyword or function name and may need quoting in downstream queries on some engines."
+    ]
+  }
+}

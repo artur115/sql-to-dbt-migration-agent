@@ -1,0 +1,23 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 517,
+    "output_tokens": 2005,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 706
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "with tmp_ranked as (\n    select\n        o.*,\n        row_number() over (\n            partition by order_id\n            order by _loaded_at desc nulls first\n        ) as rn\n    from {{ source('raw', 'orders') }} o\n)\nselect\n    order_id,\n    customer_id,\n    order_ts,\n    lower(trim(status)) as status,\n    channel,\n    promo_code\nfrom tmp_ranked\nwhere rn = 1",
+    "notes": "This is a direct port: the temp table becomes a CTE and the final SELECT is unchanged. The output matches the legacy table exactly, with two caveats that depend on the data. (1) NULL ordering: DuckDB sorts NULLs last by default, even for DESC. The legacy dialect is not stated, but the three-part names and CREATE OR REPLACE / CREATE TEMP TABLE syntax look like Snowflake, where DESC puts NULLs first. I have written NULLS FIRST explicitly to match that. If the legacy warehouse puts NULLs last for DESC (for example BigQuery or SQL Server), change this to NULLS LAST. This only matters when an order_id has a row with a NULL _loaded_at. (2) Ties: if two or more rows for the same order_id share the same maximum _loaded_at, ROW_NUMBER picks one arbitrarily, both in the legacy job and in DuckDB. If those tied rows differ in any output column, no one can reproduce the legacy result row for row. I have not added a tie-breaker, to avoid inventing logic. I recommend checking the raw data for such ties before cut-over. If ties with differing values exist, the job owner should choose a tie-break column.",
+    "quirks_found": [
+      "Nondeterministic dedup: ROW_NUMBER() ordered only by _loaded_at DESC has no tie-breaker, so when rows for the same order_id share the same latest _loaded_at, which row survives is arbitrary.",
+      "NULL _loaded_at handling depends on the engine. In Snowflake or Postgres, DESC puts NULLs first, so a row with a NULL _loaded_at would 'win' over properly timestamped loads. The model makes this explicit with NULLS FIRST.",
+      "Rows with NULL order_id all fall into a single partition, so only one NULL-order_id row is kept and the rest are silently dropped.",
+      "TRIM only removes spaces, so tabs, newlines and non-breaking spaces stay in status. Values that differ only by such characters are not fully normalised.",
+      "LOWER(TRIM(status)) leaves NULL status as NULL and turns an all-space status into an empty string '' rather than NULL.",
+      "_loaded_at is used only for dedup and is not output, so downstream consumers cannot see which load version was kept."
+    ]
+  }
+}

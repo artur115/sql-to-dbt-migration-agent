@@ -1,0 +1,27 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 918,
+    "output_tokens": 1472,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "WITH tmp_sold AS (\n    SELECT p.category, SUM(i.quantity) AS units_sold\n    FROM {{ source('raw', 'order_items') }} i\n    JOIN {{ source('raw', 'products') }} p USING (product_id)\n    GROUP BY 1\n),\ntmp_ret AS (\n    SELECT p.category, SUM(r.quantity) AS units_returned\n    FROM {{ source('raw', 'returns') }} r\n    JOIN {{ source('raw', 'orders') }} o ON o.order_id = r.order_id AND o._loaded_at = o.order_ts\n    JOIN {{ source('raw', 'products') }} p ON p.product_id = r.product_id\n    WHERE r.return_ts <= o.order_ts + INTERVAL 60 DAY\n    GROUP BY 1\n)\nSELECT s.category, s.units_sold, COALESCE(r.units_returned, 0) AS units_returned,\n       ROUND(COALESCE(r.units_returned, 0) * 1.0 / s.units_sold, 4) AS return_rate\nFROM tmp_sold s LEFT JOIN tmp_ret r USING (category)",
+    "notes": "This is a direct translation. The two temp tables become CTEs, and the raw tables are swapped for source() calls. The final SELECT, the column order, the join semantics and the rounding expression are unchanged. The output does not depend on run time or randomness, so an exact match is possible. I kept the odd orders join condition (o._loaded_at = o.order_ts) on purpose. The job owner should check whether it was meant to be a dedup or filter, because it probably drops most orders.",
+    "quirks_found": [
+      "Returns are only counted when the order's _loaded_at exactly equals its order_ts (o._loaded_at = o.order_ts in the join). This is likely a bug and probably excludes most returns.",
+      "There is no lower bound on the 60-day window. Returns with return_ts before order_ts are still counted. Returns with a NULL return_ts are excluded.",
+      "Duplicate rows in raw.orders that share an order_id (and pass the _loaded_at = order_ts check) fan out the returns join and inflate units_returned.",
+      "Duplicate product_id rows in raw.products fan out both the sold and the returned sums.",
+      "Returns are not tied to specific order_items lines. A returned product does not have to appear in the order's items.",
+      "Products with a NULL category are grouped together as a NULL-category row in tmp_sold. USING (category) never matches NULL, so that row always shows units_returned = 0.",
+      "Categories that have returns but no sales are dropped, because the LEFT JOIN starts from tmp_sold.",
+      "If units_sold is 0 or NULL, return_rate is NULL; DuckDB returns NULL on division by zero rather than raising an error.",
+      "return_rate is ROUND(... * 1.0 / units_sold, 4), a decimal rounded to 4 places. The rounding and the resulting type are kept as is.",
+      "Order status is ignored. Cancelled orders still count toward units sold and returns."
+    ]
+  }
+}

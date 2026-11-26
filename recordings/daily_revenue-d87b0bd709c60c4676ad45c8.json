@@ -1,0 +1,23 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 500,
+    "output_tokens": 763,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "SELECT paid_ts::DATE AS revenue_date, SUM(amount) AS gross_revenue, COUNT(*) AS payments\nFROM {{ source('raw', 'payments') }}\nWHERE amount > 0\nGROUP BY 1",
+    "notes": "Straight port of the CREATE TABLE AS SELECT. The table reference is swapped for source('raw','payments'). No UPDATE, DELETE or INSERT follows the CREATE, so nothing needed folding in. Column names and order are kept as revenue_date, gross_revenue, payments. The model should match the legacy table exactly, with one caveat: if paid_ts is a TIMESTAMPTZ rather than a plain TIMESTAMP, the ::DATE cast depends on the session time zone. In that case the dbt/DuckDB session time zone must match the legacy job's, or day boundaries will shift.",
+    "quirks_found": [
+      "The header says 'captured payments', but there is no capture or status filter; raw.payments has no status column. Every payment row with amount > 0 is counted, whatever its outcome.",
+      "The filter amount > 0 silently drops refunds and negative adjustments, so gross_revenue is not net of refunds. Rows with a NULL amount are also dropped, because NULL > 0 is not true.",
+      "Rows with a NULL paid_ts are not filtered out. They are grouped into a single revenue_date = NULL row.",
+      "No deduplication on payment_id. Duplicate payment rows, such as re-loaded records, are double-counted in both gross_revenue and payments.",
+      "The paid_ts::DATE cast truncates to a calendar day in whatever time zone the timestamp or session uses. There is no explicit business-time-zone conversion.",
+      "Days with no qualifying payments get no row at all, rather than a row with 0 revenue."
+    ]
+  }
+}

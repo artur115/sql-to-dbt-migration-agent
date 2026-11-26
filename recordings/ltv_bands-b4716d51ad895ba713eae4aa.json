@@ -1,0 +1,24 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 1320,
+    "output_tokens": 1551,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "with thresholds as (\n    select segment,\n           quantile_cont(lifetime_net_revenue, 0.5) as p50,\n           quantile_cont(lifetime_net_revenue, 0.9) as p90\n    from {{ ref('customer_orders_summary') }}\n    where lifetime_orders > 0\n    group by segment\n),\nbase as (\n    select customer_id, segment, lifetime_net_revenue, 'low' as band\n    from {{ ref('customer_orders_summary') }}\n    where lifetime_orders > 0\n)\nselect b.customer_id,\n       b.segment,\n       b.lifetime_net_revenue,\n       case\n           when b.lifetime_net_revenue >= t.p90 then 'high'\n           when b.lifetime_net_revenue >= t.p50 then 'mid'\n           else b.band\n       end as band\nfrom base b\nleft join thresholds t\n  on t.segment = b.segment",
+    "notes": "The temp table becomes the CTE thresholds. The two UPDATE ... FROM statements are folded into one CASE expression. The 'high' check comes first because the later UPDATE overwrites the earlier one. The thresholds CTE has one row per segment, so the left join cannot duplicate rows. A customer with no matching threshold row (NULL segment) keeps 'low', which matches the UPDATE behaviour, because rows with no FROM match are not touched. p90 >= p50 always holds, so the CASE order gives the same result as running the two updates in sequence. Every row of the legacy table comes from the same filter (lifetime_orders > 0), so the row count is the same.",
+    "quirks_found": [
+      "Customers with a NULL segment are always banded 'low'. The UPDATE join t.segment = b.segment never matches NULL, even though QUANTILE_CONT does build a threshold row for the NULL segment group.",
+      "Customers with NULL lifetime_net_revenue are always 'low' because the comparison against the thresholds is NULL. QUANTILE_CONT also ignores those NULLs when it computes the thresholds.",
+      "If every revenue in a segment is NULL, p50 and p90 are NULL and the whole segment stays 'low'.",
+      "QUANTILE_CONT interpolates, so thresholds may be values that no customer actually has. The comparisons use >=, so ties at the threshold move up a band.",
+      "For a segment with a single customer (or identical revenues), p50 = p90 = that value, so every customer in the segment is banded 'high'.",
+      "Customers with negative lifetime net revenue (heavy refunds) can still land in 'mid' or 'high' if their whole segment is negative, because the thresholds are relative to each segment.",
+      "Thresholds are computed only over customers with lifetime_orders > 0, the same filter as the banded population. Customers with zero orders are excluded from the output entirely."
+    ]
+  }
+}

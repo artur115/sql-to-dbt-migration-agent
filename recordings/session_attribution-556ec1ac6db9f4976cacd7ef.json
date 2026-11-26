@@ -1,0 +1,24 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 949,
+    "output_tokens": 1117,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "SELECT o.order_id, o.customer_id, o.order_ts,\n       COALESCE((\n         SELECT s.source\n         FROM {{ source('raw', 'web_sessions') }} s\n         WHERE s.customer_id = o.customer_id\n           AND s.started_at <= o.order_ts\n           AND s.started_at > o.order_ts - INTERVAL 7 DAY\n         ORDER BY s.started_at DESC, s.session_id DESC\n         LIMIT 1\n       ), 'unattributed') AS last_touch_source\nFROM {{ ref('stg_orders_clean') }} o\nWHERE o.customer_id IS NOT NULL AND o.status <> 'cancelled'",
+    "notes": "Direct translation. DuckDB supports correlated scalar subqueries with ORDER BY ... LIMIT 1, so the logic is kept verbatim with only the table references swapped: web_sessions becomes source('raw','web_sessions') and stg_orders_clean becomes ref('stg_orders_clean'). Columns stay in the same order: order_id, customer_id, order_ts, last_touch_source. Row count matches stg_orders_clean after the filter, and any duplicate order rows are preserved. Exact equivalence assumes the legacy warehouse used the same ordering semantics as DuckDB, where NULLs sort last under DESC by default. That only matters if session_id or started_at can be NULL in the tie-break.",
+    "quirks_found": [
+      "status <> 'cancelled' also drops orders whose status is NULL, because the comparison evaluates to NULL.",
+      "The attribution window is asymmetric: a session starting exactly at order_ts counts, but one starting exactly 7 days before does not.",
+      "The latest session is picked first and then COALESCE is applied. If that session's source is NULL, the order shows 'unattributed' even when an earlier session in the window has a non-NULL source.",
+      "Sessions with NULL started_at or NULL customer_id never match any order.",
+      "Ties on started_at are broken by the highest session_id. If session_id is also NULL, the pick depends on how NULLs are ordered.",
+      "Sessions after the order timestamp are ignored, and there is no fallback to sessions older than 7 days.",
+      "Duplicate rows in stg_orders_clean are not deduplicated, so each one gets its own attribution row."
+    ]
+  }
+}

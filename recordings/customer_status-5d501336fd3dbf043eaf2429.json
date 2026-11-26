@@ -1,0 +1,24 @@
+{
+  "model": "claude-opus-5-5",
+  "effort": "high",
+  "usage": {
+    "input_tokens": 1116,
+    "output_tokens": 1422,
+    "cache_read_input_tokens": 706,
+    "cache_creation_input_tokens": 0
+  },
+  "output": {
+    "can_migrate": true,
+    "model_sql": "SELECT\n    customer_id,\n    lifetime_orders,\n    lifetime_net_revenue,\n    last_order,\n    CASE\n        WHEN last_order < DATE '2026-05-01' THEN 'lapsed'\n        WHEN lifetime_orders = 0 THEN 'prospect'\n        WHEN lifetime_net_revenue >= 2500 THEN 'vip'\n        ELSE 'active'\n    END AS status\nFROM {{ source('raw', 'customer_orders_summary') if false else ref('customer_orders_summary') }}",
+    "notes": "The three UPDATEs are folded into a single CASE that gives the same final result as running them in script order. UPDATE 1 sets 'prospect' when lifetime_orders = 0. UPDATE 2 then sets 'lapsed' when last_order < 2026-05-01, overwriting 'prospect', so 'lapsed' is checked first in the CASE. UPDATE 3 only touches rows still 'active', meaning neither earlier condition matched, so 'vip' comes after both. NULL comparisons evaluate to unknown in both the UPDATE WHERE clauses and the CASE WHEN branches, so rows with NULL lifetime_orders, last_order or lifetime_net_revenue behave the same way: they fall through and stay 'active' unless another condition matches. The cutoff date is a hardcoded literal rather than CURRENT_DATE, so the output does not depend on when the job runs. The source is the already-migrated model customer_orders_summary, referenced via ref(). Columns and their order match the legacy table: customer_id, lifetime_orders, lifetime_net_revenue, last_order, status. Row count is unchanged because there are no filters or joins.",
+    "quirks_found": [
+      "The lapsed cutoff is hardcoded to DATE '2026-05-01' instead of being relative to the run date, so the status goes stale over time.",
+      "'lapsed' overrides 'prospect' because UPDATE 2 runs after UPDATE 1. A row with lifetime_orders = 0 and an old last_order ends up 'lapsed'.",
+      "Prospects (lifetime_orders = 0) most likely have a NULL last_order, so they stay 'prospect'. If they had a non-NULL old last_order they would become 'lapsed'.",
+      "Rows with NULL lifetime_orders and NULL last_order are never prospect or lapsed. They stay 'active', or become 'vip' if revenue >= 2500.",
+      "VIP only applies to rows that are still 'active'. High-revenue lapsed customers stay 'lapsed', not 'vip'.",
+      "The VIP threshold uses >= 2500 on lifetime_net_revenue. NULL revenue never qualifies.",
+      "Comparing last_order to a DATE literal relies on implicit casting if last_order is a timestamp. A timestamp on 2026-05-01 itself counts as not lapsed."
+    ]
+  }
+}
