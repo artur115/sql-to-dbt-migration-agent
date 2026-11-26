@@ -1,0 +1,70 @@
+version: 2
+models:
+- name: stg_orders_clean
+  meta:
+    owner: data-platform
+    migrated_from: customer/legacy_jobs/stg_orders_clean.sql
+- name: dim_customers
+  meta:
+    owner: crm-analytics
+    migrated_from: customer/legacy_jobs/dim_customers.sql
+- name: daily_revenue
+  meta:
+    owner: finance-analytics
+    migrated_from: customer/legacy_jobs/daily_revenue.sql
+- name: dim_products
+  meta:
+    owner: merchandising
+    migrated_from: customer/legacy_jobs/dim_products.sql
+- name: promo_usage
+  meta:
+    owner: growth
+    migrated_from: customer/legacy_jobs/promo_usage.sql
+- name: refunds_daily
+  meta:
+    owner: finance-analytics
+    migrated_from: customer/legacy_jobs/refunds_daily.sql
+- name: return_rate_by_category
+  meta:
+    owner: ops-analytics
+    migrated_from: customer/legacy_jobs/return_rate_by_category.sql
+- name: returns_by_reason
+  meta:
+    owner: ops-analytics
+    migrated_from: customer/legacy_jobs/returns_by_reason.sql
+- name: sessions_by_source
+  meta:
+    owner: growth
+    migrated_from: customer/legacy_jobs/sessions_by_source.sql
+- name: category_monthly_sales
+  meta:
+    owner: merchandising
+    migrated_from: customer/legacy_jobs/category_monthly_sales.sql
+- name: channel_mix
+  meta:
+    owner: growth
+    migrated_from: customer/legacy_jobs/channel_mix.sql
+- name: order_totals
+  meta:
+    owner: finance-analytics
+    migrated_from: customer/legacy_jobs/order_totals.sql
+- name: repeat_purchase_rate
+  meta:
+    owner: crm-analytics
+    migrated_from: customer/legacy_jobs/repeat_purchase_rate.sql
+- name: session_attribution
+  meta:
+    owner: growth
+    migrated_from: customer/legacy_jobs/session_attribution.sql
+- name: top_products_by_region
+  meta:
+    owner: merchandising
+    migrated_from: customer/legacy_jobs/top_products_by_region.sql
+- name: aov_by_segment
+  meta:
+    owner: finance-analytics
+    migrated_from: customer/legacy_jobs/aov_by_segment.sql
+- name: customer_orders_summary
+  meta:
+    owner: crm-analytics
+    migrated_from: customer/legacy_jobs/customer_orders_summary.sql

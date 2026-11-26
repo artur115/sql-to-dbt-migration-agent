@@ -1,0 +1,32 @@
+name: migration checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python customer/generate_data.py
+      - name: Unit tests
+        run: python -m pytest -q
+      - name: Rule-based baseline
+        run: python -m migrator.run --translator baseline
+      - name: Agent run, replayed from recorded responses (no API key in CI)
+        run: |
+          if ls recordings/*.json >/dev/null 2>&1; then
+            python -m migrator.run --translator llm --mode replay
+          else
+            echo "No recordings committed yet; skipping the agent replay."
+          fi
+      - name: dbt build of the shipped models
+        run: cd dbt_project && dbt build --profiles-dir .
+      - name: Gate - every shipped model equals its legacy table
+        run: python scripts/verify_dbt.py

@@ -1,0 +1,58 @@
+version: 2
+sources:
+- name: raw
+  database: warehouse
+  schema: raw
+  description: Harbor & Pine Outfitters raw tables (synthetic).
+  tables:
+  - name: customers
+    columns:
+    - name: customer_id
+    - name: region
+    - name: segment
+    - name: signup_date
+    - name: marketing_opt_in
+  - name: order_items
+    columns:
+    - name: order_id
+    - name: line_no
+    - name: product_id
+    - name: quantity
+    - name: unit_price
+  - name: orders
+    columns:
+    - name: order_id
+    - name: customer_id
+    - name: order_ts
+    - name: status
+    - name: channel
+    - name: promo_code
+    - name: _loaded_at
+  - name: payments
+    columns:
+    - name: payment_id
+    - name: order_id
+    - name: amount
+    - name: method
+    - name: paid_ts
+  - name: products
+    columns:
+    - name: product_id
+    - name: category
+    - name: list_price
+    - name: is_active
+  - name: returns
+    columns:
+    - name: return_id
+    - name: order_id
+    - name: product_id
+    - name: quantity
+    - name: return_ts
+    - name: reason
+  - name: web_sessions
+    columns:
+    - name: session_id
+    - name: customer_id
+    - name: started_at
+    - name: source
+    - name: pageviews

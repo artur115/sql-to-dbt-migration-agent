@@ -1,0 +1,9 @@
+# Local, file-based warehouse. Nothing to sign up for.
+harbor_pine_migration:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ../data/warehouse.duckdb
+      schema: migrated
+      threads: 4

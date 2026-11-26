@@ -1,0 +1,10 @@
+name: harbor_pine_migration
+version: "1.0.0"
+config-version: 2
+profile: harbor_pine_migration
+
+model-paths: ["models"]
+
+models:
+  harbor_pine_migration:
+    +materialized: table

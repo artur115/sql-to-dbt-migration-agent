@@ -1,0 +1,289 @@
+{
+  "summary": {
+    "translator": "baseline",
+    "jobs": 24,
+    "accepted": 17,
+    "rejected_mismatch": 0,
+    "needs_human": 7,
+    "by_complexity": {
+      "simple": {
+        "jobs": 8,
+        "accepted": 8
+      },
+      "medium": {
+        "jobs": 8,
+        "accepted": 8
+      },
+      "hard": {
+        "jobs": 8,
+        "accepted": 1
+      }
+    }
+  },
+  "jobs": [
+    {
+      "job": "stg_orders_clean",
+      "owner": "data-platform",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 30000,
+      "quirks_found": [],
+      "model_sql": "WITH tmp_ranked AS (\n  SELECT\n    o.*,\n    ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY _loaded_at DESC) AS rn\n  FROM {{ source('raw', 'orders') }} AS o\n)\nSELECT\n  order_id,\n  customer_id,\n  order_ts,\n  LOWER(TRIM(status)) AS status,\n  channel,\n  promo_code\nFROM tmp_ranked\nWHERE\n  rn = 1\n"
+    },
+    {
+      "job": "dim_customers",
+      "owner": "crm-analytics",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 4000,
+      "quirks_found": [],
+      "model_sql": "WITH tmp_first AS (\n  SELECT\n    customer_id,\n    CAST(MIN(order_ts) AS DATE) AS first_order_date\n  FROM {{ source('raw', 'orders') }}\n  WHERE\n    NOT customer_id IS NULL\n  GROUP BY\n    customer_id\n)\nSELECT\n  c.customer_id,\n  c.region,\n  c.segment,\n  c.signup_date,\n  c.marketing_opt_in,\n  f.first_order_date\nFROM {{ source('raw', 'customers') }} AS c\nLEFT JOIN tmp_first AS f\n  ON f.customer_id = c.customer_id\n"
+    },
+    {
+      "job": "daily_revenue",
+      "owner": "finance-analytics",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 692,
+      "quirks_found": [],
+      "model_sql": "SELECT\n  CAST(paid_ts AS DATE) AS revenue_date,\n  SUM(amount) AS gross_revenue,\n  COUNT(*) AS payments\nFROM {{ source('raw', 'payments') }}\nWHERE\n  amount > 0\nGROUP BY\n  1\n"
+    },
+    {
+      "job": "dim_products",
+      "owner": "merchandising",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 271,
+      "quirks_found": [],
+      "model_sql": "SELECT\n  product_id,\n  category,\n  list_price,\n  CASE\n    WHEN list_price < 50\n    THEN 'budget'\n    WHEN list_price < 200\n    THEN 'mid'\n    ELSE 'premium'\n  END AS price_band\nFROM {{ source('raw', 'products') }}\nWHERE\n  is_active\n"
+    },
+    {
+      "job": "marketing_audience",
+      "owner": "growth",
+      "complexity": "hard",
+      "status": "needs_human",
+      "reason": "rule-based translator can't express it: DELETE statement changes the table after it is created",
+      "attempts": 1,
+      "legacy_rows": 1670,
+      "quirks_found": [],
+      "model_sql": ""
+    },
+    {
+      "job": "promo_usage",
+      "owner": "growth",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 4,
+      "quirks_found": [],
+      "model_sql": "SELECT\n  COALESCE(promo_code, 'none') AS promo_code,\n  COUNT(DISTINCT order_id) AS orders,\n  COUNT(DISTINCT customer_id) AS buyers\nFROM {{ source('raw', 'orders') }}\nGROUP BY\n  1\n"
+    },
+    {
+      "job": "refunds_daily",
+      "owner": "finance-analytics",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 711,
+      "quirks_found": [],
+      "model_sql": "SELECT\n  CAST(paid_ts AS DATE) AS refund_date,\n  -SUM(amount) AS refunded,\n  COUNT(*) AS refunds\nFROM {{ source('raw', 'payments') }}\nWHERE\n  method = 'refund'\nGROUP BY\n  1\n"
+    },
+    {
+      "job": "return_rate_by_category",
+      "owner": "ops-analytics",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 6,
+      "quirks_found": [],
+      "model_sql": "WITH tmp_sold AS (\n  SELECT\n    p.category,\n    SUM(i.quantity) AS units_sold\n  FROM {{ source('raw', 'order_items') }} AS i\n  JOIN {{ source('raw', 'products') }} AS p\n    USING (product_id)\n  GROUP BY\n    1\n), tmp_ret AS (\n  SELECT\n    p.category,\n    SUM(r.quantity) AS units_returned\n  FROM {{ source('raw', 'returns') }} AS r\n  JOIN {{ source('raw', 'orders') }} AS o\n    ON o.order_id = r.order_id AND o._loaded_at = o.order_ts\n  JOIN {{ source('raw', 'products') }} AS p\n    ON p.product_id = r.product_id\n  WHERE\n    r.return_ts <= o.order_ts + INTERVAL '60' DAY\n  GROUP BY\n    1\n)\nSELECT\n  s.category,\n  s.units_sold,\n  COALESCE(r.units_returned, 0) AS units_returned,\n  ROUND(COALESCE(r.units_returned, 0) * 1.0 / s.units_sold, 4) AS return_rate\nFROM tmp_sold AS s\nLEFT JOIN tmp_ret AS r\n  USING (category)\n"
+    },
+    {
+      "job": "returns_by_reason",
+      "owner": "ops-analytics",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 103,
+      "quirks_found": [],
+      "model_sql": "SELECT\n  CAST(DATE_TRUNC('MONTH', return_ts) AS DATE) AS month,\n  reason,\n  SUM(quantity) AS units\nFROM {{ source('raw', 'returns') }}\nGROUP BY\n  1,\n  2\n"
+    },
+    {
+      "job": "sessions_by_source",
+      "owner": "growth",
+      "complexity": "simple",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 138,
+      "quirks_found": [],
+      "model_sql": "WITH tmp_sessions AS (\n  SELECT\n    CAST(DATE_TRUNC('MONTH', started_at) AS DATE) AS month,\n    source,\n    pageviews\n  FROM {{ source('raw', 'web_sessions') }}\n)\nSELECT\n  month,\n  source,\n  COUNT(*) AS sessions,\n  SUM(pageviews) AS pageviews\nFROM tmp_sessions\nGROUP BY\n  month,\n  source\n"
+    },
+    {
+      "job": "category_monthly_sales",
+      "owner": "merchandising",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 138,
+      "quirks_found": [],
+      "model_sql": "WITH tmp_cat AS (\n  SELECT\n    CAST(DATE_TRUNC('MONTH', o.order_ts) AS DATE) AS month,\n    p.category,\n    SUM(i.quantity * i.unit_price) AS revenue\n  FROM {{ source('raw', 'order_items') }} AS i\n  JOIN {{ ref('stg_orders_clean') }} AS o\n    ON o.order_id = i.order_id\n  JOIN {{ source('raw', 'products') }} AS p\n    ON p.product_id = i.product_id\n  WHERE\n    o.status <> 'cancelled'\n  GROUP BY\n    1,\n    2\n)\nSELECT\n  month,\n  category,\n  revenue,\n  ROUND(revenue / SUM(revenue) OVER (PARTITION BY month), 4) AS share_of_month\nFROM tmp_cat\n"
+    },
+    {
+      "job": "channel_mix",
+      "owner": "growth",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 32,
+      "quirks_found": [],
+      "model_sql": "WITH tmp_q AS (\n  SELECT\n    CAST(DATE_TRUNC('QUARTER', order_ts) AS DATE) AS quarter,\n    channel,\n    COUNT(*) AS orders\n  FROM {{ ref('stg_orders_clean') }}\n  WHERE\n    status <> 'cancelled'\n  GROUP BY\n    1,\n    2\n), tmp_q_tot AS (\n  SELECT\n    quarter,\n    SUM(orders) AS total_orders\n  FROM tmp_q\n  GROUP BY\n    quarter\n)\nSELECT\n  q.quarter,\n  q.channel,\n  q.orders,\n  ROUND(q.orders * 1.0 / t.total_orders, 4) AS share\nFROM tmp_q AS q\nJOIN tmp_q_tot AS t\n  USING (quarter)\n"
+    },
+    {
+      "job": "open_orders_snapshot",
+      "owner": "ops-analytics",
+      "complexity": "hard",
+      "status": "needs_human",
+      "reason": "output depends on when it runs (current_date); agree a fixed as-of date or seed with the owner",
+      "attempts": 0,
+      "legacy_rows": 184,
+      "quirks_found": [],
+      "model_sql": ""
+    },
+    {
+      "job": "order_totals",
+      "owner": "finance-analytics",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 30000,
+      "quirks_found": [],
+      "model_sql": "WITH tmp_items AS (\n  SELECT\n    order_id,\n    SUM(quantity * unit_price) AS gross_amount,\n    SUM(quantity) AS units\n  FROM {{ source('raw', 'order_items') }}\n  GROUP BY\n    order_id\n), tmp_pay AS (\n  SELECT\n    order_id,\n    SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS captured,\n    SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END) AS refunded\n  FROM {{ source('raw', 'payments') }}\n  GROUP BY\n    order_id\n)\nSELECT\n  o.order_id,\n  o.customer_id,\n  o.order_ts,\n  o.status,\n  o.channel,\n  i.gross_amount,\n  i.units,\n  COALESCE(p.captured, 0) AS captured,\n  COALESCE(p.refunded, 0) AS refunded,\n  COALESCE(p.captured, 0) - COALESCE(p.refunded, 0) AS net_revenue\nFROM {{ ref('stg_orders_clean') }} AS o\nJOIN tmp_items AS i\n  ON i.order_id = o.order_id\nLEFT JOIN tmp_pay AS p\n  ON p.order_id = o.order_id\n"
+    },
+    {
+      "job": "qa_sample_orders",
+      "owner": "data-platform",
+      "complexity": "hard",
+      "status": "needs_human",
+      "reason": "output depends on when it runs (random); agree a fixed as-of date or seed with the owner",
+      "attempts": 0,
+      "legacy_rows": 300,
+      "quirks_found": [],
+      "model_sql": ""
+    },
+    {
+      "job": "repeat_purchase_rate",
+      "owner": "crm-analytics",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 23,
+      "quirks_found": [],
+      "model_sql": "WITH tmp_seq AS (\n  SELECT\n    customer_id,\n    order_ts,\n    LEAD(order_ts) OVER (PARTITION BY customer_id ORDER BY order_ts, order_id) AS next_ts,\n    ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_ts, order_id) AS n\n  FROM {{ ref('stg_orders_clean') }}\n  WHERE\n    NOT customer_id IS NULL AND status <> 'cancelled'\n)\nSELECT\n  CAST(DATE_TRUNC('MONTH', order_ts) AS DATE) AS cohort_month,\n  COUNT(*) AS new_buyers,\n  SUM(CASE WHEN next_ts <= order_ts + INTERVAL '30' DAY THEN 1 ELSE 0 END) AS repeat_30d,\n  (\n    SUM(CASE WHEN next_ts <= order_ts + INTERVAL '30' DAY THEN 1 ELSE 0 END) * 100\n  ) // COUNT(*) AS repeat_pct\nFROM tmp_seq\nWHERE\n  n = 1\nGROUP BY\n  1\n"
+    },
+    {
+      "job": "session_attribution",
+      "owner": "growth",
+      "complexity": "hard",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 24958,
+      "quirks_found": [],
+      "model_sql": "SELECT\n  o.order_id,\n  o.customer_id,\n  o.order_ts,\n  COALESCE(\n    (\n      SELECT\n        s.source\n      FROM {{ source('raw', 'web_sessions') }} AS s\n      WHERE\n        s.customer_id = o.customer_id\n        AND s.started_at <= o.order_ts\n        AND s.started_at > o.order_ts - INTERVAL '7' DAY\n      ORDER BY\n        s.started_at DESC,\n        s.session_id DESC\n      LIMIT 1\n    ),\n    'unattributed'\n  ) AS last_touch_source\nFROM {{ ref('stg_orders_clean') }} AS o\nWHERE\n  NOT o.customer_id IS NULL AND o.status <> 'cancelled'\n"
+    },
+    {
+      "job": "top_products_by_region",
+      "owner": "merchandising",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 25,
+      "quirks_found": [],
+      "model_sql": "WITH tmp_units AS (\n  SELECT\n    c.region,\n    i.product_id,\n    SUM(i.quantity) AS units\n  FROM {{ source('raw', 'order_items') }} AS i\n  JOIN {{ ref('stg_orders_clean') }} AS o\n    ON o.order_id = i.order_id\n  JOIN {{ source('raw', 'customers') }} AS c\n    ON c.customer_id = o.customer_id\n  GROUP BY\n    1,\n    2\n)\nSELECT\n  region,\n  product_id,\n  units,\n  rnk\nFROM (\n  SELECT\n    *,\n    ROW_NUMBER() OVER (PARTITION BY region ORDER BY units DESC, product_id) AS rnk\n  FROM tmp_units\n)\nWHERE\n  rnk <= 5\n"
+    },
+    {
+      "job": "revenue_reconciliation",
+      "owner": "finance-analytics",
+      "complexity": "hard",
+      "status": "needs_human",
+      "reason": "rule-based translator can't express it: INSERT statement changes the table after it is created",
+      "attempts": 1,
+      "legacy_rows": 724,
+      "quirks_found": [],
+      "model_sql": ""
+    },
+    {
+      "job": "aov_by_segment",
+      "owner": "finance-analytics",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 15,
+      "quirks_found": [],
+      "model_sql": "SELECT\n  c.segment,\n  c.region,\n  COUNT(*) AS orders,\n  ROUND(AVG(t.gross_amount), 2) AS aov\nFROM {{ ref('order_totals') }} AS t\nJOIN {{ source('raw', 'customers') }} AS c\n  ON c.customer_id = t.customer_id\nWHERE\n  t.status <> 'cancelled'\nGROUP BY\n  1,\n  2\n"
+    },
+    {
+      "job": "customer_orders_summary",
+      "owner": "crm-analytics",
+      "complexity": "medium",
+      "status": "accepted",
+      "reason": "parallel run matches",
+      "attempts": 1,
+      "legacy_rows": 4000,
+      "quirks_found": [],
+      "model_sql": "WITH tmp_agg AS (\n  SELECT\n    customer_id,\n    COUNT(*) AS lifetime_orders,\n    SUM(net_revenue) AS lifetime_net_revenue,\n    CAST(MIN(order_ts) AS DATE) AS first_order,\n    CAST(MAX(order_ts) AS DATE) AS last_order\n  FROM {{ ref('order_totals') }}\n  WHERE\n    status <> 'cancelled' AND NOT customer_id IS NULL\n  GROUP BY\n    customer_id\n)\nSELECT\n  d.customer_id,\n  d.region,\n  d.segment,\n  COALESCE(a.lifetime_orders, 0) AS lifetime_orders,\n  COALESCE(a.lifetime_net_revenue, 0) AS lifetime_net_revenue,\n  a.first_order,\n  a.last_order\nFROM {{ ref('dim_customers') }} AS d\nLEFT JOIN tmp_agg AS a\n  ON a.customer_id = d.customer_id\n"
+    },
+    {
+      "job": "weekly_kpis",
+      "owner": "finance-analytics",
+      "complexity": "hard",
+      "status": "needs_human",
+      "reason": "rule-based translator can't express it: UPDATE statement changes the table after it is created",
+      "attempts": 1,
+      "legacy_rows": 99,
+      "quirks_found": [],
+      "model_sql": ""
+    },
+    {
+      "job": "customer_status",
+      "owner": "crm-analytics",
+      "complexity": "hard",
+      "status": "needs_human",
+      "reason": "rule-based translator can't express it: UPDATE statement changes the table after it is created",
+      "attempts": 1,
+      "legacy_rows": 4000,
+      "quirks_found": [],
+      "model_sql": ""
+    },
+    {
+      "job": "ltv_bands",
+      "owner": "crm-analytics",
+      "complexity": "hard",
+      "status": "needs_human",
+      "reason": "rule-based translator can't express it: UPDATE statement changes the table after it is created",
+      "attempts": 1,
+      "legacy_rows": 3995,
+      "quirks_found": [],
+      "model_sql": ""
+    }
+  ]
+}

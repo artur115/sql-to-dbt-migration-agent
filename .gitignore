@@ -1,0 +1,9 @@
+data/*.duckdb
+data/*.wal
+dbt_project/target/
+dbt_project/logs/
+dbt_project/dbt_packages/
+__pycache__/
+.pytest_cache/
+logs/
+dbt_project/.user.yml
